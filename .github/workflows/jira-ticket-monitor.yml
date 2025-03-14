@@ -1,0 +1,306 @@
+name: jira-ticket-monitor
+on:
+  schedule:
+    - cron: '0,30 * * * 1-5'  # Every 30 minutes on weekdays
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/jira-ticket-monitor.yml'
+env:
+  TZ: 'Asia/Kolkata'  # Set timezone to IST for the entire workflow
+jobs:
+  monitor-jira-tickets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 2
+          
+      - name: Send Workflow Update Notification
+        if: github.event_name == 'push'
+        run: |
+          COMMIT_MSG=$(git log -1 --pretty=format:"%s")
+          CHANGES=$(git diff --unified=0 HEAD^ HEAD .github/workflows/jira-ticket-monitor.yml | grep "^[+-]" | grep -v "^[+-][+-][+-]" | head -n 10)
+          
+          MESSAGE="🔄 *WORKFLOW UPDATE DETECTED*\n\n📝 *Commit Message:*\n\`\`\`$COMMIT_MSG\`\`\`\n\n👨‍💻 *Changes Made:*\n\`\`\`\n$CHANGES\n...(more changes may not be shown)\n\`\`\`"
+          
+          curl -X POST \
+            -H "Content-type: application/json" \
+            --data "{\"text\": \"$MESSAGE\"}" \
+            ${{ secrets.SLACK_WEBHOOK_URL }}
+            
+      - name: Monitor JIRA Tickets
+        id: jira-monitor
+        run: |
+          # Create URL encoding function
+          urlencode() {
+            local string="${1}"
+            local strlen=${#string}
+            local encoded=""
+            local pos c o
+            
+            for (( pos=0 ; pos<strlen ; pos++ )); do
+              c=${string:$pos:1}
+              case "$c" in
+                [-_.~a-zA-Z0-9] ) o="${c}" ;;
+                * ) printf -v o '%%%02x' "'$c"
+              esac
+              encoded+="${o}"
+            done
+            echo "${encoded}"
+          }
+          
+          # JIRA Base URL for API and hyperlinks
+          JIRA_BASE_URL="https://quantium.atlassian.net"
+          JIRA_API_URL="${JIRA_BASE_URL}/rest/api/3/search"
+          JIRA_BROWSE_URL="${JIRA_BASE_URL}/issues/?jql="
+          
+          # Jira API credentials
+          AUTH_HEADER="Authorization: Basic ${{ secrets.JIRA_API_TOKEN }}"
+          ACCEPT_HEADER="Accept: application/json"
+          
+          # Define team members (from original script)
+          TEAM_MEMBERS=(
+            "Imran Mohd"
+            "Kuppala Pavan Kumar"
+            "Manikanta Raavi"
+            "Bommali Naresh"
+            "Rambabu Yarramsetti"
+            "Sateesh Gulivindala"
+            "Shaik Amair Ahmed"
+          )
+          
+          # Process each team member to get data for total counts
+          for MEMBER in "${TEAM_MEMBERS[@]}"; do
+            echo "🔍 Fetching open tickets for: $MEMBER"
+            
+            # Query: All open tickets
+            OPEN_JQL="assignee = \"$MEMBER\" AND statusCategory != Done"
+            OPEN_JQL_ENCODED=$(urlencode "$OPEN_JQL")
+            OPEN_URL="${JIRA_API_URL}?jql=${OPEN_JQL_ENCODED}&maxResults=1000"
+            
+            # Fetch open tickets
+            OPEN_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "$OPEN_URL")
+            
+            # Extract total count
+            MEMBER_OPEN_COUNT=$(jq -r '.total' <<< "$OPEN_RESPONSE")
+            
+            if [ "$MEMBER_OPEN_COUNT" -gt 0 ]; then
+              TOTAL_OPEN_TICKETS=$((TOTAL_OPEN_TICKETS + MEMBER_OPEN_COUNT))
+              
+              # Extract priority counts based on your 5 priority levels
+              P1=$(jq '[.issues[] | select(.fields.priority.name == "1 - Critical" or .fields.priority.name == "Critical" or .fields.priority.name == "1")] | length' <<< "$OPEN_RESPONSE")
+              P2=$(jq '[.issues[] | select(.fields.priority.name == "2 - High" or .fields.priority.name == "High" or .fields.priority.name == "2")] | length' <<< "$OPEN_RESPONSE")
+              P3=$(jq '[.issues[] | select(.fields.priority.name == "3 - Medium" or .fields.priority.name == "Medium" or .fields.priority.name == "3")] | length' <<< "$OPEN_RESPONSE")
+              P4=$(jq '[.issues[] | select(.fields.priority.name == "4 - Low" or .fields.priority.name == "Low" or .fields.priority.name == "4")] | length' <<< "$OPEN_RESPONSE")
+              P5=$(jq '[.issues[] | select(.fields.priority.name == "5 - Very Low" or .fields.priority.name == "Very Low" or .fields.priority.name == "5")] | length' <<< "$OPEN_RESPONSE")
+              
+              P1_COUNT=$((P1_COUNT + P1))
+              P2_COUNT=$((P2_COUNT + P2))
+              P3_COUNT=$((P3_COUNT + P3))
+              P4_COUNT=$((P4_COUNT + P4))
+              P5_COUNT=$((P5_COUNT + P5))
+            fi
+          done
+          
+          # Build the complete message with all parts
+          MESSAGE="${HEADER}\n\n📈 *Summary:*"
+          MESSAGE="${MESSAGE}\n• *Open Tickets:* ${TOTAL_OPEN_TICKETS} (Critical: ${P1_COUNT} 🔴 | High: ${P2_COUNT} 🟠 | Medium: ${P3_COUNT} 🟡 | Low: ${P4_COUNT} 🟢 | Very Low: ${P5_COUNT} 🔵)"
+          
+          # Add team workload header
+          MESSAGE="${MESSAGE}\n\n👥 *Team Workload:*"
+          
+          # Process each team member again to build formatted message
+          for MEMBER in "${TEAM_MEMBERS[@]}"; do
+            # First query: All open tickets
+            ALL_JQL="assignee = \"$MEMBER\" AND statusCategory != Done"
+            ALL_JQL_ENCODED=$(urlencode "$ALL_JQL")
+            ALL_LINK="${JIRA_BROWSE_URL}${ALL_JQL_ENCODED}"
+            
+            # Fetch open tickets
+            ALL_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "${JIRA_API_URL}?jql=${ALL_JQL_ENCODED}&maxResults=1000")
+            
+            # Extract total count
+            TOTAL_COUNT=$(jq -r '.total' <<< "$ALL_RESPONSE")
+            
+            if [ "$TOTAL_COUNT" -gt 0 ]; then
+              # Priority counts for all 5 levels
+              P1=$(jq '[.issues[] | select(.fields.priority.name == "1 - Critical" or .fields.priority.name == "Critical" or .fields.priority.name == "1")] | length' <<< "$ALL_RESPONSE")
+              P2=$(jq '[.issues[] | select(.fields.priority.name == "2 - High" or .fields.priority.name == "High" or .fields.priority.name == "2")] | length' <<< "$ALL_RESPONSE")
+              P3=$(jq '[.issues[] | select(.fields.priority.name == "3 - Medium" or .fields.priority.name == "Medium" or .fields.priority.name == "3")] | length' <<< "$ALL_RESPONSE")
+              P4=$(jq '[.issues[] | select(.fields.priority.name == "4 - Low" or .fields.priority.name == "Low" or .fields.priority.name == "4")] | length' <<< "$ALL_RESPONSE")
+              P5=$(jq '[.issues[] | select(.fields.priority.name == "5 - Very Low" or .fields.priority.name == "Very Low" or .fields.priority.name == "5")] | length' <<< "$ALL_RESPONSE")
+              
+              # Tickets created within last 7 days
+              WEEK_JQL="assignee = \"$MEMBER\" AND statusCategory != Done AND created >= -7d"
+              WEEK_JQL_ENCODED=$(urlencode "$WEEK_JQL")
+              WEEK_LINK="${JIRA_BROWSE_URL}${WEEK_JQL_ENCODED}"
+              
+              WEEK_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "${JIRA_API_URL}?jql=${WEEK_JQL_ENCODED}&maxResults=1000")
+              WEEK_COUNT=$(jq -r '.total' <<< "$WEEK_RESPONSE")
+              
+              # Tickets created within 8-30 days
+              MONTH_JQL="assignee = \"$MEMBER\" AND statusCategory != Done AND created < -7d AND created >= -30d"
+              MONTH_JQL_ENCODED=$(urlencode "$MONTH_JQL")
+              MONTH_LINK="${JIRA_BROWSE_URL}${MONTH_JQL_ENCODED}"
+              
+              MONTH_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "${JIRA_API_URL}?jql=${MONTH_JQL_ENCODED}&maxResults=1000")
+              MONTH_COUNT=$(jq -r '.total' <<< "$MONTH_RESPONSE")
+              
+              # Tickets older than 30 days
+              OLDER_JQL="assignee = \"$MEMBER\" AND statusCategory != Done AND created < -30d"
+              OLDER_JQL_ENCODED=$(urlencode "$OLDER_JQL")
+              OLDER_LINK="${JIRA_BROWSE_URL}${OLDER_JQL_ENCODED}"
+              
+              OLDER_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "${JIRA_API_URL}?jql=${OLDER_JQL_ENCODED}&maxResults=1000")
+              OLDER_COUNT=$(jq -r '.total' <<< "$OLDER_RESPONSE")
+              
+              # Format member line with priority breakdown
+              MEMBER_LINE="• *${MEMBER}:* <${ALL_LINK}|${TOTAL_COUNT}> ("
+              
+              # Add priority breakdown
+              if [ "$P1" -gt 0 ]; then
+                P1_JQL="assignee = \"$MEMBER\" AND statusCategory != Done AND priority in (\"1 - Critical\", Critical, 1)"
+                P1_LINK="${JIRA_BROWSE_URL}$(urlencode "$P1_JQL")"
+                MEMBER_LINE="${MEMBER_LINE}🔴 <${P1_LINK}|${P1}>"
+              else
+                MEMBER_LINE="${MEMBER_LINE}🔴 0"
+              fi
+              
+              if [ "$P2" -gt 0 ]; then
+                P2_JQL="assignee = \"$MEMBER\" AND statusCategory != Done AND priority in (\"2 - High\", High, 2)"
+                P2_LINK="${JIRA_BROWSE_URL}$(urlencode "$P2_JQL")"
+                MEMBER_LINE="${MEMBER_LINE} | 🟠 <${P2_LINK}|${P2}>"
+              else
+                MEMBER_LINE="${MEMBER_LINE} | 🟠 0"
+              fi
+              
+              if [ "$P3" -gt 0 ]; then
+                P3_JQL="assignee = \"$MEMBER\" AND statusCategory != Done AND priority in (\"3 - Medium\", Medium, 3)"
+                P3_LINK="${JIRA_BROWSE_URL}$(urlencode "$P3_JQL")"
+                MEMBER_LINE="${MEMBER_LINE} | 🟡 <${P3_LINK}|${P3}>"
+              else
+                MEMBER_LINE="${MEMBER_LINE} | 🟡 0"
+              fi
+              
+              if [ "$P4" -gt 0 ]; then
+                P4_JQL="assignee = \"$MEMBER\" AND statusCategory != Done AND priority in (\"4 - Low\", Low, 4)"
+                P4_LINK="${JIRA_BROWSE_URL}$(urlencode "$P4_JQL")"
+                MEMBER_LINE="${MEMBER_LINE} | 🟢 <${P4_LINK}|${P4}>"
+              else
+                MEMBER_LINE="${MEMBER_LINE} | 🟢 0"
+              fi
+              
+              if [ "$P5" -gt 0 ]; then
+                P5_JQL="assignee = \"$MEMBER\" AND statusCategory != Done AND priority in (\"5 - Very Low\", \"Very Low\", 5)"
+                P5_LINK="${JIRA_BROWSE_URL}$(urlencode "$P5_JQL")"
+                MEMBER_LINE="${MEMBER_LINE} | 🔵 <${P5_LINK}|${P5}>"
+              else
+                MEMBER_LINE="${MEMBER_LINE} | 🔵 0"
+              fi
+              
+              MEMBER_LINE="${MEMBER_LINE})"
+              
+              # No Updates info - REMOVED
+              
+              # Add age breakdown
+              MEMBER_LINE="${MEMBER_LINE}\n  ↳ *Age:* "
+              
+              if [ "$WEEK_COUNT" -gt 0 ]; then
+                MEMBER_LINE="${MEMBER_LINE}🟢 <${WEEK_LINK}|${WEEK_COUNT}> (≤7d)"
+              else
+                MEMBER_LINE="${MEMBER_LINE}🟢 0 (≤7d)"
+              fi
+              
+              if [ "$MONTH_COUNT" -gt 0 ]; then
+                MEMBER_LINE="${MEMBER_LINE} | 🟡 <${MONTH_LINK}|${MONTH_COUNT}> (8-30d)"
+              else
+                MEMBER_LINE="${MEMBER_LINE} | 🟡 0 (8-30d)"
+              fi
+              
+              if [ "$OLDER_COUNT" -gt 0 ]; then
+                MEMBER_LINE="${MEMBER_LINE} | 🔴 <${OLDER_LINK}|${OLDER_COUNT}> (>30d)"
+              else
+                MEMBER_LINE="${MEMBER_LINE} | 🔴 0 (>30d)"
+              fi
+              
+              # Add to message
+              MESSAGE="${MESSAGE}\n${MEMBER_LINE}"
+            else
+              # No tickets for this member
+              MESSAGE="${MESSAGE}\n• *${MEMBER}:* 0"
+            fi
+          done
+          
+          # Build JQL for team members (using OR conditions)
+          TEAM_MEMBERS_CLAUSE=""
+          for MEMBER in "${TEAM_MEMBERS[@]}"; do
+            if [ -n "$TEAM_MEMBERS_CLAUSE" ]; then
+              TEAM_MEMBERS_CLAUSE="$TEAM_MEMBERS_CLAUSE OR "
+            fi
+            TEAM_MEMBERS_CLAUSE="$TEAM_MEMBERS_CLAUSE assignee = \"$MEMBER\""
+          done
+          
+          # Create team-specific JQL queries for priorities
+          TEAM_P1_JQL="($TEAM_MEMBERS_CLAUSE) AND statusCategory != Done AND priority in (\"1 - Critical\", Critical, 1)"
+          TEAM_P1_LINK="${JIRA_BROWSE_URL}$(urlencode "$TEAM_P1_JQL")"
+          
+          TEAM_P2_JQL="($TEAM_MEMBERS_CLAUSE) AND statusCategory != Done AND priority in (\"2 - High\", High, 2)"
+          TEAM_P2_LINK="${JIRA_BROWSE_URL}$(urlencode "$TEAM_P2_JQL")"
+          
+          TEAM_P3_JQL="($TEAM_MEMBERS_CLAUSE) AND statusCategory != Done AND priority in (\"3 - Medium\", Medium, 3)"
+          TEAM_P3_LINK="${JIRA_BROWSE_URL}$(urlencode "$TEAM_P3_JQL")"
+          
+          TEAM_P4_JQL="($TEAM_MEMBERS_CLAUSE) AND statusCategory != Done AND priority in (\"4 - Low\", Low, 4)"
+          TEAM_P4_LINK="${JIRA_BROWSE_URL}$(urlencode "$TEAM_P4_JQL")"
+          
+          TEAM_P5_JQL="($TEAM_MEMBERS_CLAUSE) AND statusCategory != Done AND priority in (\"5 - Very Low\", \"Very Low\", 5)"
+          TEAM_P5_LINK="${JIRA_BROWSE_URL}$(urlencode "$TEAM_P5_JQL")"
+          
+          # Create team-specific JQL queries for age
+          TEAM_WEEK_JQL="($TEAM_MEMBERS_CLAUSE) AND statusCategory != Done AND created >= -7d"
+          TEAM_WEEK_LINK="${JIRA_BROWSE_URL}$(urlencode "$TEAM_WEEK_JQL")"
+          
+          TEAM_MONTH_JQL="($TEAM_MEMBERS_CLAUSE) AND statusCategory != Done AND created < -7d AND created >= -30d"
+          TEAM_MONTH_LINK="${JIRA_BROWSE_URL}$(urlencode "$TEAM_MONTH_JQL")"
+          
+          TEAM_OLDER_JQL="($TEAM_MEMBERS_CLAUSE) AND statusCategory != Done AND created < -30d"
+          TEAM_OLDER_LINK="${JIRA_BROWSE_URL}$(urlencode "$TEAM_OLDER_JQL")"
+          
+          # Add legends
+          MESSAGE="${MESSAGE}\n\n📊 *Priority Legend:* <${TEAM_P1_LINK}|🔴 Critical> | <${TEAM_P2_LINK}|🟠 High> | <${TEAM_P3_LINK}|🟡 Medium> | <${TEAM_P4_LINK}|🟢 Low> | <${TEAM_P5_LINK}|🔵 Very Low>"
+          MESSAGE="${MESSAGE}\n📅 *Age Legend:* <${TEAM_WEEK_LINK}|🟢 ≤7 days> | <${TEAM_MONTH_LINK}|🟡 8-30 days> | <${TEAM_OLDER_LINK}|🔴 >30 days>"
+          
+          echo "Sending notification to Slack..."
+          
+          # Slack sending with error handling
+          MAX_RETRIES=3
+          RETRY_COUNT=0
+          
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            # Send the message and capture the full response
+            RESPONSE=$(curl -s -X POST \
+                 -H "Content-type: application/json" \
+                 --data "{\"text\": \"$MESSAGE\"}" \
+                 ${{ secrets.SLACK_WEBHOOK_URL }})
+            
+            # Log the response for debugging
+            echo "Slack API response: $RESPONSE"
+            
+            # Check if it was successful
+            if echo "$RESPONSE" | grep -q "ok"; then
+              echo "Notification sent successfully"
+              exit 0
+            fi
+            
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+              echo "Retrying... attempt $RETRY_COUNT of $MAX_RETRIES"
+              sleep 2
+            fi
+          done
+          
+          echo "::error::Failed to send Slack notification after $MAX_RETRIES attempts"
+          exit 1
