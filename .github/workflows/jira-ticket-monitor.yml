@@ -2,7 +2,7 @@ name: jira-ticket-monitor
 
 on:
   schedule:
-    - cron: '0,30 * * * 1-5'  # Every 30 minutes on weekdays
+    - cron: '30 4 * * 1-5'  # 10:00 AM AET / 4:30 AM IST on weekdays
   workflow_dispatch:
   push:
     paths:
@@ -39,7 +39,7 @@ jobs:
         run: |
           # Debug: Print version info
           echo "===== RUNNING JIRA MONITOR SCRIPT ====="
-          echo "Version: March 15, 2025 - Enhanced with hyperlinks"
+          echo "Version: March 15, 2025 - Final Fixed Version"
           
           # Create URL encoding function
           urlencode() {
@@ -89,13 +89,17 @@ jobs:
           # These match the values in customfield_10065
           PRIORITY_NAMES=("1 - Critical" "2 - High" "3 - Medium" "4 - Low" "5 - Very Low")
           PRIORITY_SHORT=("P1" "P2" "P3" "P4" "P5")
+          
+          # Define emojis - used only in priority breakdown in summary
           EMOJIS=("🔴" "🟠" "🟡" "🔵" "⚪")
-          AGE_EMOJIS=("🟢" "🟡" "🔴")
+          
+          # Age categories without emojis
+          AGE_CATEGORIES=("≤7 days" "8-30 days" ">30 days")
           
           # Echo information about priority definitions
           echo "Using defined priorities:"
           for i in {0..4}; do
-            echo "  ${PRIORITY_SHORT[$i]} = ${PRIORITY_NAMES[$i]} ${EMOJIS[$i]}"
+            echo "  ${PRIORITY_SHORT[$i]} = ${PRIORITY_NAMES[$i]}"
           done
           
           # Build team members clause for JQL
@@ -113,23 +117,30 @@ jobs:
           for i in {0..4}; do
             PRIORITY_COUNTS[$i]=0
           done
+          UNDEFINED_PRIORITY_COUNT=0  # New counter for undefined priorities
           
-          # Time in IST
+          # Time in IST and Sydney
           IST_TIME=$(date +"%I:%M %p IST")
           IST_DATE=$(date +"%d-%m-%Y")
+          SYDNEY_TIME=$(TZ='Australia/Sydney' date +"%I:%M %p AEDT")
           
           # Build header part
           HEADER="📊 *JIRA Monitor*"
           
-          # Prepare team workload section
-          TEAM_WORKLOAD="\n\n*Team Workload:*"
+          # MESSAGE 1: Create the summary message
+          # Create team-wide JQL for all tickets
+          ALL_TEAM_JQL="(${TEAM_MEMBERS_CLAUSE}) AND status NOT IN (Closed, Resolved, Cancelled)"
+          ALL_TEAM_LINK="${JIRA_BROWSE_URL}$(urlencode "$ALL_TEAM_JQL")"
           
-          # Process each team member
+          # Store team member data for workload sections
+          MEMBER_DATA=()
+          
+          # Process each team member for total counts
           for MEMBER in "${TEAM_MEMBERS[@]}"; do
             echo "🔍 Fetching open tickets for: $MEMBER"
             
-            # First query: All open tickets
-            ALL_JQL="assignee = \"$MEMBER\" AND statusCategory != Done"
+            # First query: All open tickets using the standard format
+            ALL_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled)"
             ALL_JQL_ENCODED=$(urlencode "$ALL_JQL")
             ALL_URL="${JIRA_API_URL}?jql=${ALL_JQL_ENCODED}&maxResults=1000&fields=${PRIORITY_FIELD}"
             ALL_LINK="${JIRA_BROWSE_URL}${ALL_JQL_ENCODED}"
@@ -141,230 +152,274 @@ jobs:
             TOTAL_COUNT=$(jq -r '.total' <<< "$ALL_RESPONSE")
             TOTAL_OPEN_TICKETS=$((TOTAL_OPEN_TICKETS + TOTAL_COUNT))
             
-            echo "Found $TOTAL_COUNT tickets for $MEMBER"
+            MEMBER_PRIORITY_COUNTS=()
+            for i in {0..4}; do
+              MEMBER_PRIORITY_COUNTS[$i]=0
+            done
+            MEMBER_UNDEFINED_COUNT=0  # New counter for undefined priorities per member
             
             if [ "$TOTAL_COUNT" -gt 0 ]; then
               # Parse all tickets to count priorities
               ISSUES=$(jq '.issues' <<< "$ALL_RESPONSE")
               
-              # Initialize counters for each priority
-              MEMBER_PRIORITY_COUNTS=()
-              for i in {0..4}; do
-                MEMBER_PRIORITY_COUNTS[$i]=0
-              done
-              
               # Go through each ticket and examine its priority value
               ISSUE_COUNT=$(jq '. | length' <<< "$ISSUES")
-              echo "Processing $ISSUE_COUNT tickets..."
               
               for (( j=0; j<ISSUE_COUNT; j++ )); do
                 ISSUE=$(jq ".[$j]" <<< "$ISSUES")
                 
-                # Get the key for logging
-                TICKET_KEY=$(jq -r '.key' <<< "$ISSUE")
-                
-                # Get the priority value from the nested JSON directly in one step
+                # Get the priority value from the nested JSON directly
                 PRIORITY_VALUE=$(jq -r ".fields.\"$PRIORITY_FIELD\".value" <<< "$ISSUE")
-                echo "Ticket $TICKET_KEY: Priority = $PRIORITY_VALUE"
+                
+                # Debug the priority value to help diagnose issues
+                echo "  Ticket: $(jq -r '.key' <<< "$ISSUE") | Priority Value: '$PRIORITY_VALUE'"
                 
                 # Count based on the exact priority value pattern
                 if [[ "$PRIORITY_VALUE" == "1 - Critical" ]]; then
                   MEMBER_PRIORITY_COUNTS[0]=$((MEMBER_PRIORITY_COUNTS[0] + 1))
-                  echo "  Counted as P1 (Critical)"
+                  PRIORITY_COUNTS[0]=$((PRIORITY_COUNTS[0] + 1))
                 elif [[ "$PRIORITY_VALUE" == "2 - High" ]]; then
                   MEMBER_PRIORITY_COUNTS[1]=$((MEMBER_PRIORITY_COUNTS[1] + 1))
-                  echo "  Counted as P2 (High)"
+                  PRIORITY_COUNTS[1]=$((PRIORITY_COUNTS[1] + 1))
                 elif [[ "$PRIORITY_VALUE" == "3 - Medium" ]]; then
                   MEMBER_PRIORITY_COUNTS[2]=$((MEMBER_PRIORITY_COUNTS[2] + 1))
-                  echo "  Counted as P3 (Medium)"
+                  PRIORITY_COUNTS[2]=$((PRIORITY_COUNTS[2] + 1))
                 elif [[ "$PRIORITY_VALUE" == "4 - Low" ]]; then
                   MEMBER_PRIORITY_COUNTS[3]=$((MEMBER_PRIORITY_COUNTS[3] + 1))
-                  echo "  Counted as P4 (Low)"
+                  PRIORITY_COUNTS[3]=$((PRIORITY_COUNTS[3] + 1))
                 elif [[ "$PRIORITY_VALUE" == "5 - Very Low" ]]; then
                   MEMBER_PRIORITY_COUNTS[4]=$((MEMBER_PRIORITY_COUNTS[4] + 1))
-                  echo "  Counted as P5 (Very Low)"
+                  PRIORITY_COUNTS[4]=$((PRIORITY_COUNTS[4] + 1))
                 else
-                  echo "  ⚠️ UNMATCHED PRIORITY: $PRIORITY_VALUE"
-                  # Default to P3 if unknown
+                  # Default to P3 if unknown, but also track undefined separately
                   MEMBER_PRIORITY_COUNTS[2]=$((MEMBER_PRIORITY_COUNTS[2] + 1))
-                  echo "  Defaulted to P3"
+                  PRIORITY_COUNTS[2]=$((PRIORITY_COUNTS[2] + 1))
+                  
+                  # Increment undefined counters
+                  MEMBER_UNDEFINED_COUNT=$((MEMBER_UNDEFINED_COUNT + 1))
+                  UNDEFINED_PRIORITY_COUNT=$((UNDEFINED_PRIORITY_COUNT + 1))
+                  
+                  echo "  NOTE: Ticket with undefined priority counted as P3: $(jq -r '.key' <<< "$ISSUE")"
                 fi
-              done
-              
-              # Update total counts
-              for i in {0..4}; do
-                PRIORITY_COUNTS[$i]=$((PRIORITY_COUNTS[$i] + MEMBER_PRIORITY_COUNTS[$i]))
-              done
-              
-              echo "Priority counts for $MEMBER:"
-              for i in {0..4}; do
-                echo "  ${PRIORITY_SHORT[$i]}: ${MEMBER_PRIORITY_COUNTS[$i]}"
               done
               
               # Create JQL queries for each priority
               PRIORITY_JQLS=()
               PRIORITY_LINKS=()
-              for i in {0..4}; do
-                PRIORITY_NUMBER=$((i + 1))
-                PRIORITY_JQL="assignee = \"$MEMBER\" AND statusCategory != Done AND \"${PRIORITY_FIELD}[Value]\" ~ \"${PRIORITY_NUMBER} -\""
-                PRIORITY_JQLS[$i]="$PRIORITY_JQL"
-                PRIORITY_LINKS[$i]="${JIRA_BROWSE_URL}$(urlencode "$PRIORITY_JQL")"
-              done
               
-              # Format priority section of message
-              MEMBER_LINE="• *${MEMBER}:* <${ALL_LINK}|${TOTAL_COUNT}>"
-              MEMBER_LINE="${MEMBER_LINE}\n  ↳ Priority: "
+              # P1 - Critical Priority
+              PRIORITY_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND \"Priority (SD)[Dropdown]\" = \"1 - Critical\""
+              PRIORITY_LINKS[0]="${JIRA_BROWSE_URL}$(urlencode "$PRIORITY_JQL")"
               
-              for i in {0..4}; do
-                if [ $i -gt 0 ]; then
-                  MEMBER_LINE="${MEMBER_LINE} | "
-                fi
-                if [ ${MEMBER_PRIORITY_COUNTS[$i]} -gt 0 ]; then
-                  MEMBER_LINE="${MEMBER_LINE}${EMOJIS[$i]} <${PRIORITY_LINKS[$i]}|${MEMBER_PRIORITY_COUNTS[$i]}>"
-                else
-                  MEMBER_LINE="${MEMBER_LINE}${EMOJIS[$i]} ${MEMBER_PRIORITY_COUNTS[$i]}"
-                fi
-              done
+              # P2 - High Priority
+              PRIORITY_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND \"Priority (SD)[Dropdown]\" = \"2 - High\""
+              PRIORITY_LINKS[1]="${JIRA_BROWSE_URL}$(urlencode "$PRIORITY_JQL")"
+              
+              # P3 - Medium Priority
+              PRIORITY_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND \"Priority (SD)[Dropdown]\" = \"3 - Medium\""
+              PRIORITY_LINKS[2]="${JIRA_BROWSE_URL}$(urlencode "$PRIORITY_JQL")"
+              
+              # P4 - Low Priority
+              PRIORITY_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND \"Priority (SD)[Dropdown]\" = \"4 - Low\""
+              PRIORITY_LINKS[3]="${JIRA_BROWSE_URL}$(urlencode "$PRIORITY_JQL")"
+              
+              # P5 - Very Low Priority
+              PRIORITY_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND \"Priority (SD)[Dropdown]\" = \"5 - Very Low\""
+              PRIORITY_LINKS[4]="${JIRA_BROWSE_URL}$(urlencode "$PRIORITY_JQL")"
               
               # Format age breakdown with hyperlinks
-              WEEK_JQL="assignee = \"$MEMBER\" AND statusCategory != Done AND created >= -7d"
+              WEEK_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND created >= -7d"
               WEEK_JQL_ENCODED=$(urlencode "$WEEK_JQL")
               WEEK_URL="${JIRA_API_URL}?jql=${WEEK_JQL_ENCODED}&maxResults=1000"
               WEEK_LINK="${JIRA_BROWSE_URL}${WEEK_JQL_ENCODED}"
               WEEK_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "$WEEK_URL")
               WEEK_COUNT=$(jq -r '.total' <<< "$WEEK_RESPONSE")
               
-              MONTH_JQL="assignee = \"$MEMBER\" AND statusCategory != Done AND created < -7d AND created >= -30d"
+              MONTH_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND created < -7d AND created >= -30d"
               MONTH_JQL_ENCODED=$(urlencode "$MONTH_JQL")
               MONTH_URL="${JIRA_API_URL}?jql=${MONTH_JQL_ENCODED}&maxResults=1000"
               MONTH_LINK="${JIRA_BROWSE_URL}${MONTH_JQL_ENCODED}"
               MONTH_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "$MONTH_URL")
               MONTH_COUNT=$(jq -r '.total' <<< "$MONTH_RESPONSE")
               
-              OLDER_JQL="assignee = \"$MEMBER\" AND statusCategory != Done AND created < -30d"
+              OLDER_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND created < -30d"
               OLDER_JQL_ENCODED=$(urlencode "$OLDER_JQL")
               OLDER_URL="${JIRA_API_URL}?jql=${OLDER_JQL_ENCODED}&maxResults=1000"
               OLDER_LINK="${JIRA_BROWSE_URL}${OLDER_JQL_ENCODED}"
               OLDER_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "$OLDER_URL")
               OLDER_COUNT=$(jq -r '.total' <<< "$OLDER_RESPONSE")
               
-              # Construct age text with hyperlinks
-              MEMBER_LINE="${MEMBER_LINE}\n  ↳ Age: "
+              # Format message for this team member - no emojis in both priority and age
+              MEMBER_MESSAGE="• *${MEMBER}:* <${ALL_LINK}|${TOTAL_COUNT}>"
+              MEMBER_MESSAGE="${MEMBER_MESSAGE}\n  ↳ Priority: "
+              
+              for i in {0..4}; do
+                if [ $i -gt 0 ]; then
+                  MEMBER_MESSAGE="${MEMBER_MESSAGE} | "
+                fi
+                
+                if [ ${MEMBER_PRIORITY_COUNTS[$i]} -gt 0 ]; then
+                  MEMBER_MESSAGE="${MEMBER_MESSAGE}${PRIORITY_SHORT[$i]}: <${PRIORITY_LINKS[$i]}|${MEMBER_PRIORITY_COUNTS[$i]}>"
+                else
+                  MEMBER_MESSAGE="${MEMBER_MESSAGE}${PRIORITY_SHORT[$i]}: ${MEMBER_PRIORITY_COUNTS[$i]}"
+                fi
+              done
+              
+              # Add age breakdown to the message - no emojis
+              MEMBER_MESSAGE="${MEMBER_MESSAGE}\n  ↳ Age: "
               
               if [ "$WEEK_COUNT" -gt 0 ]; then
-                MEMBER_LINE="${MEMBER_LINE}${AGE_EMOJIS[0]} <${WEEK_LINK}|${WEEK_COUNT}> (≤7d)"
+                MEMBER_MESSAGE="${MEMBER_MESSAGE}<${WEEK_LINK}|${WEEK_COUNT}> (≤7d)"
               else
-                MEMBER_LINE="${MEMBER_LINE}${AGE_EMOJIS[0]} ${WEEK_COUNT} (≤7d)"
+                MEMBER_MESSAGE="${MEMBER_MESSAGE}${WEEK_COUNT} (≤7d)"
               fi
               
-              MEMBER_LINE="${MEMBER_LINE} | "
+              MEMBER_MESSAGE="${MEMBER_MESSAGE} | "
               
               if [ "$MONTH_COUNT" -gt 0 ]; then
-                MEMBER_LINE="${MEMBER_LINE}${AGE_EMOJIS[1]} <${MONTH_LINK}|${MONTH_COUNT}> (8-30d)"
+                MEMBER_MESSAGE="${MEMBER_MESSAGE}<${MONTH_LINK}|${MONTH_COUNT}> (8-30d)"
               else
-                MEMBER_LINE="${MEMBER_LINE}${AGE_EMOJIS[1]} ${MONTH_COUNT} (8-30d)"
+                MEMBER_MESSAGE="${MEMBER_MESSAGE}${MONTH_COUNT} (8-30d)"
               fi
               
-              MEMBER_LINE="${MEMBER_LINE} | "
+              MEMBER_MESSAGE="${MEMBER_MESSAGE} | "
               
               if [ "$OLDER_COUNT" -gt 0 ]; then
-                MEMBER_LINE="${MEMBER_LINE}${AGE_EMOJIS[2]} <${OLDER_LINK}|${OLDER_COUNT}> (>30d)"
+                MEMBER_MESSAGE="${MEMBER_MESSAGE}<${OLDER_LINK}|${OLDER_COUNT}> (>30d)"
               else
-                MEMBER_LINE="${MEMBER_LINE}${AGE_EMOJIS[2]} ${OLDER_COUNT} (>30d)"
+                MEMBER_MESSAGE="${MEMBER_MESSAGE}${OLDER_COUNT} (>30d)"
               fi
             else
               # No tickets for this member
-              MEMBER_LINE="• *${MEMBER}:* 0"
+              MEMBER_MESSAGE="• *${MEMBER}:* 0"
             fi
             
-            # Add to team workload section
-            TEAM_WORKLOAD="${TEAM_WORKLOAD}\n${MEMBER_LINE}"
+            # Store in array for grouping later
+            MEMBER_DATA+=("$MEMBER_MESSAGE")
           done
           
-          # Create JQL for each priority level for the entire team
+          # Create team-wide JQL for each priority level
           TEAM_PRIORITY_JQLS=()
           TEAM_PRIORITY_LINKS=()
-          for i in {0..4}; do
-            PRIORITY_NUMBER=$((i + 1))
-            TEAM_PRIORITY_JQL="(${TEAM_MEMBERS_CLAUSE}) AND statusCategory != Done AND \"${PRIORITY_FIELD}[Value]\" ~ \"${PRIORITY_NUMBER} -\""
-            TEAM_PRIORITY_JQLS[$i]="$TEAM_PRIORITY_JQL"
-            TEAM_PRIORITY_LINKS[$i]="${JIRA_BROWSE_URL}$(urlencode "$TEAM_PRIORITY_JQL")"
-          done
           
-          # Build the complete message with all parts
-          MESSAGE="$HEADER\n\n*Summary:*"
+          # P1 - Critical Priority
+          TEAM_PRIORITY_JQL="(${TEAM_MEMBERS_CLAUSE}) AND status NOT IN (Closed, Resolved, Cancelled) AND \"Priority (SD)[Dropdown]\" = \"1 - Critical\""
+          TEAM_PRIORITY_LINKS[0]="${JIRA_BROWSE_URL}$(urlencode "$TEAM_PRIORITY_JQL")"
           
-          # Plain text summary (no longer a test run)
-          MESSAGE="$MESSAGE\n• *Team JIRA Status Update*"
-          MESSAGE="$MESSAGE\n• *Open Tickets:* $TOTAL_OPEN_TICKETS"
+          # P2 - High Priority
+          TEAM_PRIORITY_JQL="(${TEAM_MEMBERS_CLAUSE}) AND status NOT IN (Closed, Resolved, Cancelled) AND \"Priority (SD)[Dropdown]\" = \"2 - High\""
+          TEAM_PRIORITY_LINKS[1]="${JIRA_BROWSE_URL}$(urlencode "$TEAM_PRIORITY_JQL")"
           
-          # Add priority breakdown with hyperlinks
+          # P3 - Medium Priority
+          TEAM_PRIORITY_JQL="(${TEAM_MEMBERS_CLAUSE}) AND status NOT IN (Closed, Resolved, Cancelled) AND \"Priority (SD)[Dropdown]\" = \"3 - Medium\""
+          TEAM_PRIORITY_LINKS[2]="${JIRA_BROWSE_URL}$(urlencode "$TEAM_PRIORITY_JQL")"
+          
+          # P4 - Low Priority
+          TEAM_PRIORITY_JQL="(${TEAM_MEMBERS_CLAUSE}) AND status NOT IN (Closed, Resolved, Cancelled) AND \"Priority (SD)[Dropdown]\" = \"4 - Low\""
+          TEAM_PRIORITY_LINKS[3]="${JIRA_BROWSE_URL}$(urlencode "$TEAM_PRIORITY_JQL")"
+          
+          # P5 - Very Low Priority
+          TEAM_PRIORITY_JQL="(${TEAM_MEMBERS_CLAUSE}) AND status NOT IN (Closed, Resolved, Cancelled) AND \"Priority (SD)[Dropdown]\" = \"5 - Very Low\""
+          TEAM_PRIORITY_LINKS[4]="${JIRA_BROWSE_URL}$(urlencode "$TEAM_PRIORITY_JQL")"
+          
+          # Create JQL for undefined priorities - using a simpler query structure
+          TEAM_UNDEFINED_JQL="(${TEAM_MEMBERS_CLAUSE}) AND status NOT IN (Closed, Resolved, Cancelled) AND priority is EMPTY"
+          TEAM_UNDEFINED_LINK="${JIRA_BROWSE_URL}$(urlencode "$TEAM_UNDEFINED_JQL")"
+          
+          # Fix the age legend hyperlinks
+          TEAM_WEEK_JQL="(${TEAM_MEMBERS_CLAUSE}) AND status NOT IN (Closed, Resolved, Cancelled) AND created >= -7d"
+          TEAM_WEEK_LINK="${JIRA_BROWSE_URL}$(urlencode "$TEAM_WEEK_JQL")"
+          
+          TEAM_MONTH_JQL="(${TEAM_MEMBERS_CLAUSE}) AND status NOT IN (Closed, Resolved, Cancelled) AND created < -7d AND created >= -30d"
+          TEAM_MONTH_LINK="${JIRA_BROWSE_URL}$(urlencode "$TEAM_MONTH_JQL")"
+          
+          TEAM_OLDER_JQL="(${TEAM_MEMBERS_CLAUSE}) AND status NOT IN (Closed, Resolved, Cancelled) AND created < -30d"
+          TEAM_OLDER_LINK="${JIRA_BROWSE_URL}$(urlencode "$TEAM_OLDER_JQL")"
+          
+          # Build the summary message (MESSAGE 1)
+          SUMMARY_MESSAGE="$HEADER\n\n*Summary:*"
+          
+          # Plain text summary with hyperlink for total tickets and time zones
+          SUMMARY_MESSAGE="$SUMMARY_MESSAGE\n• *Team JIRA Status Update* ($SYDNEY_TIME / $IST_TIME)"
+          SUMMARY_MESSAGE="$SUMMARY_MESSAGE\n• *Open Tickets:* <${ALL_TEAM_LINK}|${TOTAL_OPEN_TICKETS}>"
+          
+          # Add priority breakdown with hyperlinks to specific priority searches - NO emojis
           PRIORITY_SUMMARY="\n• *Priority Breakdown:* "
           for i in {0..4}; do
             if [ $i -gt 0 ]; then
               PRIORITY_SUMMARY="${PRIORITY_SUMMARY} | "
             fi
             if [ ${PRIORITY_COUNTS[$i]} -gt 0 ]; then
-              PRIORITY_SUMMARY="${PRIORITY_SUMMARY}${PRIORITY_SHORT[$i]}: <${TEAM_PRIORITY_LINKS[$i]}|${PRIORITY_COUNTS[$i]}> ${EMOJIS[$i]}"
+              PRIORITY_SUMMARY="${PRIORITY_SUMMARY}${PRIORITY_SHORT[$i]}: <${TEAM_PRIORITY_LINKS[$i]}|${PRIORITY_COUNTS[$i]}>"
             else
-              PRIORITY_SUMMARY="${PRIORITY_SUMMARY}${PRIORITY_SHORT[$i]}: ${PRIORITY_COUNTS[$i]} ${EMOJIS[$i]}"
+              PRIORITY_SUMMARY="${PRIORITY_SUMMARY}${PRIORITY_SHORT[$i]}: ${PRIORITY_COUNTS[$i]}"
             fi
           done
           
-          MESSAGE="$MESSAGE$PRIORITY_SUMMARY"
+          SUMMARY_MESSAGE="$SUMMARY_MESSAGE$PRIORITY_SUMMARY"
           
-          # Add team workload section
-          MESSAGE="$MESSAGE$TEAM_WORKLOAD"
+          # Create age legend matching the exact format from queue-monitor.yml but without colors
+          AGE_LEGEND="📊 *Legend:* <${TEAM_WEEK_LINK}|≤7 days> | <${TEAM_MONTH_LINK}|8-30 days> | <${TEAM_OLDER_LINK}|30+ days>"
           
-          # Create team-wide age links
-          TEAM_WEEK_JQL="(${TEAM_MEMBERS_CLAUSE}) AND statusCategory != Done AND created >= -7d"
-          TEAM_WEEK_LINK="${JIRA_BROWSE_URL}$(urlencode "$TEAM_WEEK_JQL")"
+          # Create one group for legend and notes
+          LEGEND_GROUP="$AGE_LEGEND"
           
-          TEAM_MONTH_JQL="(${TEAM_MEMBERS_CLAUSE}) AND statusCategory != Done AND created < -7d AND created >= -30d"
-          TEAM_MONTH_LINK="${JIRA_BROWSE_URL}$(urlencode "$TEAM_MONTH_JQL")"
+          # Add note about undefined priorities to the same group
+          if [ ${UNDEFINED_PRIORITY_COUNT} -gt 0 ]; then
+            LEGEND_GROUP="$LEGEND_GROUP\n\n⚠️ *Note:* Undefined priorities (${UNDEFINED_PRIORITY_COUNT}) are counted under P3."
+          fi
           
-          TEAM_OLDER_JQL="(${TEAM_MEMBERS_CLAUSE}) AND statusCategory != Done AND created < -30d"
-          TEAM_OLDER_LINK="${JIRA_BROWSE_URL}$(urlencode "$TEAM_OLDER_JQL")"
+          # Add the grouped legend to summary message
+          SUMMARY_MESSAGE="$SUMMARY_MESSAGE\n\n$LEGEND_GROUP"
           
-          # Add priority field info and legends with hyperlinks
-          MESSAGE="$MESSAGE\n\n💡 *Priority Field Used:* $PRIORITY_FIELD"
-          MESSAGE="$MESSAGE\n📊 *Priority Legend:* ${EMOJIS[0]} ${PRIORITY_SHORT[0]} | ${EMOJIS[1]} ${PRIORITY_SHORT[1]} | ${EMOJIS[2]} ${PRIORITY_SHORT[2]} | ${EMOJIS[3]} ${PRIORITY_SHORT[3]} | ${EMOJIS[4]} ${PRIORITY_SHORT[4]}"
-          MESSAGE="$MESSAGE\n📅 *Age Legend:* <${TEAM_WEEK_LINK}|🟢 ≤7 days> | <${TEAM_MONTH_LINK}|🟡 8-30 days> | <${TEAM_OLDER_LINK}|🔴 >30 days>"
+          echo "Sending summary message to Slack..."
           
-          # Add timestamp
-          MESSAGE="$MESSAGE\n\n⏰ *Last Updated:* $IST_DATE at $IST_TIME"
+          # Send the summary message first
+          ESCAPED_SUMMARY=$(echo "$SUMMARY_MESSAGE" | sed 's/"/\\"/g')
+          curl -s -X POST \
+               -H "Content-type: application/json" \
+               --data "{\"text\":\"$ESCAPED_SUMMARY\"}" \
+               ${{ secrets.SLACK_WEBHOOK_URL }}
           
-          echo "Sending notification to Slack..."
+          # Sleep to ensure messages are sent in order
+          sleep 1
           
-          # Slack sending with error handling
-          MAX_RETRIES=3
-          RETRY_COUNT=0
+          # Prepare workload messages - group team members into smaller batches
+          WORKLOAD_MESSAGE="*Team Workload:*"
+          CURRENT_LENGTH=${#WORKLOAD_MESSAGE}
+          MESSAGE_LIMIT=3500  # Conservative limit for Slack messages
           
-          # Escape double quotes for JSON
-          ESCAPED_MESSAGE=$(echo "$MESSAGE" | sed 's/"/\\"/g')
+          for (( i=0; i<${#MEMBER_DATA[@]}; i++ )); do
+            # Calculate length with this member added
+            NEXT_ADDITION="\n${MEMBER_DATA[$i]}"
+            NEXT_LENGTH=$((CURRENT_LENGTH + ${#NEXT_ADDITION}))
+            
+            # If adding this member would make message too large, send current message and start a new one
+            if [ $NEXT_LENGTH -gt $MESSAGE_LIMIT ] && [ $CURRENT_LENGTH -gt 20 ]; then
+              echo "Sending workload message batch to Slack..."
+              ESCAPED_WORKLOAD=$(echo "$WORKLOAD_MESSAGE" | sed 's/"/\\"/g')
+              curl -s -X POST \
+                   -H "Content-type: application/json" \
+                   --data "{\"text\":\"$ESCAPED_WORKLOAD\"}" \
+                   ${{ secrets.SLACK_WEBHOOK_URL }}
+              
+              # Start a new message batch
+              WORKLOAD_MESSAGE="*Team Workload (continued):*"
+              CURRENT_LENGTH=${#WORKLOAD_MESSAGE}
+              sleep 1
+            fi
+            
+            # Add this member to the current message
+            WORKLOAD_MESSAGE="$WORKLOAD_MESSAGE\n${MEMBER_DATA[$i]}"
+            CURRENT_LENGTH=${#WORKLOAD_MESSAGE}
+          done
           
-          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-            # Send the message with simpler formatting
-            RESPONSE=$(curl -s -X POST \
+          # Send any remaining workload data
+          if [ $CURRENT_LENGTH -gt 20 ]; then
+            echo "Sending final workload message to Slack..."
+            ESCAPED_WORKLOAD=$(echo "$WORKLOAD_MESSAGE" | sed 's/"/\\"/g')
+            curl -s -X POST \
                  -H "Content-type: application/json" \
-                 --data "{\"text\":\"$ESCAPED_MESSAGE\"}" \
-                 ${{ secrets.SLACK_WEBHOOK_URL }})
-            
-            # Log the response for debugging
-            echo "Slack API response: $RESPONSE"
-            
-            # Check if it was successful
-            if echo "$RESPONSE" | grep -q "ok"; then
-              echo "Notification sent successfully"
-              exit 0
-            fi
-            
-            RETRY_COUNT=$((RETRY_COUNT + 1))
-            if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
-              echo "Retrying... attempt $RETRY_COUNT of $MAX_RETRIES"
-              sleep 2
-            fi
-          done
-          
-          echo "::error::Failed to send Slack notification after $MAX_RETRIES attempts"
-          exit 1
+                 --data "{\"text\":\"$ESCAPED_WORKLOAD\"}" \
+                 ${{ secrets.SLACK_WEBHOOK_URL }}
+          fi
