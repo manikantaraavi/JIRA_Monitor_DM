@@ -448,13 +448,14 @@ jobs:
           NO_EXTERNAL_CSV=$(IFS=,; echo "${NO_EXTERNAL_COMMENTS[*]}")
           NO_RECENT_EXTERNAL_CSV=$(IFS=,; echo "${NO_EXTERNAL_COMMENTS_7DAYS[*]}")
           
-          # Step 4: Create links to JQL queries for these ticket lists
+          # Step 4: Create links to JQL queries for these ticket lists using issueKey format
           NO_EXTERNAL_COUNT=${#NO_EXTERNAL_COMMENTS[@]}
           NO_RECENT_EXTERNAL_COUNT=${#NO_EXTERNAL_COMMENTS_7DAYS[@]}
           
           if [ $NO_EXTERNAL_COUNT -gt 0 ]; then
             # Create a JQL query specifically for tickets with no external comments
-            NO_EXT_JQL="key in (${NO_EXTERNAL_CSV}) ORDER BY key ASC"
+            # Using issueKey instead of key for direct ticket lookup
+            NO_EXT_JQL="issueKey in (${NO_EXTERNAL_CSV}) ORDER BY created DESC"
             NO_EXT_JQL_ENCODED=$(urlencode "$NO_EXT_JQL")
             NO_EXT_LINK="${JIRA_BROWSE_URL}${NO_EXT_JQL_ENCODED}"
             
@@ -465,7 +466,8 @@ jobs:
           
           if [ $NO_RECENT_EXTERNAL_COUNT -gt 0 ]; then
             # Create a JQL query for tickets with old external comments
-            OLD_EXT_JQL="key in (${NO_RECENT_EXTERNAL_CSV}) ORDER BY key ASC"
+            # Using issueKey instead of key for direct ticket lookup
+            OLD_EXT_JQL="issueKey in (${NO_RECENT_EXTERNAL_CSV}) ORDER BY created DESC"
             OLD_EXT_JQL_ENCODED=$(urlencode "$OLD_EXT_JQL")
             OLD_EXT_LINK="${JIRA_BROWSE_URL}${OLD_EXT_JQL_ENCODED}"
             
