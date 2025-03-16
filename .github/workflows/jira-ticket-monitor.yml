@@ -33,7 +33,7 @@ jobs:
         run: |
           # Debug: Print version info
           echo "===== RUNNING JIRA MONITOR SCRIPT ====="
-          echo "Version: Improved JQL Stale Detection with External Comment Filtering - Sateesh Only"
+          echo "Version: Simplified Output with Fixed Links - Sateesh Only"
           
           # Create URL encoding function
           urlencode() {
@@ -172,7 +172,7 @@ jobs:
               fi
             done
             
-            # Format age breakdown
+            # Format age breakdown - Query for each age category
             WEEK_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND created >= -7d"
             WEEK_JQL_ENCODED=$(urlencode "$WEEK_JQL")
             WEEK_LINK="${JIRA_BROWSE_URL}${WEEK_JQL_ENCODED}"
@@ -185,7 +185,8 @@ jobs:
             MONTH_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "${JIRA_API_URL}?jql=${MONTH_JQL_ENCODED}&maxResults=0")
             MONTH_COUNT=$(jq -r '.total' <<< "$MONTH_RESPONSE")
             
-            OLDER_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND created < -30d"
+            # Fix the older query format by adding proper quotes
+            OLDER_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND created < \"-30d\""
             OLDER_JQL_ENCODED=$(urlencode "$OLDER_JQL")
             OLDER_LINK="${JIRA_BROWSE_URL}${OLDER_JQL_ENCODED}"
             OLDER_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "${JIRA_API_URL}?jql=${OLDER_JQL_ENCODED}&maxResults=0")
@@ -193,6 +194,8 @@ jobs:
             
             # Format message for Sateesh
             MEMBER_MESSAGE="• *${MEMBER}:* <${ALL_LINK}|${TOTAL_COUNT}>"
+            
+            # Create separate priority JQL for each priority
             MEMBER_MESSAGE="${MEMBER_MESSAGE}\n  ↳ Priority: "
             
             for i in {0..4}; do
@@ -200,8 +203,13 @@ jobs:
                 MEMBER_MESSAGE="${MEMBER_MESSAGE} | "
               fi
               
+              # Create priority-specific JQL
+              PRIORITY_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND \"$PRIORITY_FIELD\".value = \"${PRIORITY_NAMES[$i]}\""
+              PRIORITY_JQL_ENCODED=$(urlencode "$PRIORITY_JQL")
+              PRIORITY_LINK="${JIRA_BROWSE_URL}${PRIORITY_JQL_ENCODED}"
+              
               if [ ${MEMBER_PRIORITY_COUNTS[$i]} -gt 0 ]; then
-                MEMBER_MESSAGE="${MEMBER_MESSAGE}${PRIORITY_SHORT[$i]}: ${MEMBER_PRIORITY_COUNTS[$i]}"
+                MEMBER_MESSAGE="${MEMBER_MESSAGE}<${PRIORITY_LINK}|${PRIORITY_SHORT[$i]}: ${MEMBER_PRIORITY_COUNTS[$i]}>"
               else
                 MEMBER_MESSAGE="${MEMBER_MESSAGE}${PRIORITY_SHORT[$i]}: ${MEMBER_PRIORITY_COUNTS[$i]}"
               fi
@@ -243,7 +251,7 @@ jobs:
           TEAM_MONTH_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND created < -7d AND created >= -30d"
           TEAM_MONTH_LINK="${JIRA_BROWSE_URL}$(urlencode "$TEAM_MONTH_JQL")"
           
-          TEAM_OLDER_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND created < -30d"
+          TEAM_OLDER_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND created < \"-30d\""
           TEAM_OLDER_LINK="${JIRA_BROWSE_URL}$(urlencode "$TEAM_OLDER_JQL")"
           
           # Build the summary message
@@ -259,8 +267,14 @@ jobs:
             if [ $i -gt 0 ]; then
               PRIORITY_SUMMARY="${PRIORITY_SUMMARY} | "
             fi
+            
+            # Create priority-specific JQL
+            PRIORITY_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND \"$PRIORITY_FIELD\".value = \"${PRIORITY_NAMES[$i]}\""
+            PRIORITY_JQL_ENCODED=$(urlencode "$PRIORITY_JQL")
+            PRIORITY_LINK="${JIRA_BROWSE_URL}${PRIORITY_JQL_ENCODED}"
+            
             if [ ${PRIORITY_COUNTS[$i]} -gt 0 ]; then
-              PRIORITY_SUMMARY="${PRIORITY_SUMMARY}${PRIORITY_SHORT[$i]}: ${PRIORITY_COUNTS[$i]}"
+              PRIORITY_SUMMARY="${PRIORITY_SUMMARY}<${PRIORITY_LINK}|${PRIORITY_SHORT[$i]}: ${PRIORITY_COUNTS[$i]}>"
             else
               PRIORITY_SUMMARY="${PRIORITY_SUMMARY}${PRIORITY_SHORT[$i]}: ${PRIORITY_COUNTS[$i]}"
             fi
@@ -361,7 +375,7 @@ jobs:
             # Create a message for Slack
             STALE_MESSAGE="*Stale Ticket Analysis for ${MEMBER}:*\n"
             STALE_MESSAGE="${STALE_MESSAGE}• *Potentially Stale Tickets:* 0 tickets not updated in the last 7 days\n"
-            STALE_MESSAGE="${STALE_MESSAGE}• *Tickets With No External Comments:* 0 tickets have no external comments\n"
+            STALE_MESSAGE="${STALE_MESSAGE}• *Tickets With No External Comments:* 0 tickets\n"
             
             # Send to Slack
             ESCAPED_STALE=$(echo "$STALE_MESSAGE" | sed 's/"/\\"/g')
@@ -476,24 +490,23 @@ jobs:
             OLD_EXT_LINK=""
           fi
           
-          # Step 5: Create Slack message with the results
+          # Step 5: Create Slack message with the results (SIMPLIFIED)
+          # Per your request: Just show counts with hyperlinks, no ticket number listings
           STALE_MESSAGE="*Stale Ticket Analysis for ${MEMBER}:*\n"
           STALE_MESSAGE="${STALE_MESSAGE}• *Potentially Stale Tickets:* <${STALE_LINK}|${TICKET_COUNT} tickets> not updated in the last 7 days\n"
           
-          # Add no external comments info
+          # Add no external comments info - WITHOUT ticket numbers
           STALE_MESSAGE="${STALE_MESSAGE}• *Tickets With No External Comments:* "
           if [ $NO_EXTERNAL_COUNT -gt 0 ]; then
             STALE_MESSAGE="${STALE_MESSAGE}<${NO_EXT_LINK}|${NO_EXTERNAL_COUNT} tickets>\n"
-            STALE_MESSAGE="${STALE_MESSAGE}  ↳ Ticket Numbers: ${NO_EXTERNAL_CSV}\n"
           else
             STALE_MESSAGE="${STALE_MESSAGE}0 tickets\n"
           fi
           
-          # Add old external comments info
+          # Add old external comments info - WITHOUT ticket numbers
           STALE_MESSAGE="${STALE_MESSAGE}• *Tickets With Stale External Comments (>7 days):* "
           if [ $NO_RECENT_EXTERNAL_COUNT -gt 0 ]; then
             STALE_MESSAGE="${STALE_MESSAGE}<${OLD_EXT_LINK}|${NO_RECENT_EXTERNAL_COUNT} tickets>\n"
-            STALE_MESSAGE="${STALE_MESSAGE}  ↳ Ticket Numbers: ${NO_RECENT_EXTERNAL_CSV}\n"
           else
             STALE_MESSAGE="${STALE_MESSAGE}0 tickets\n"
           fi
