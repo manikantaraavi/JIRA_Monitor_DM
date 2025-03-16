@@ -33,7 +33,7 @@ jobs:
         run: |
           # Debug: Print version info
           echo "===== RUNNING JIRA MONITOR SCRIPT ====="
-          echo "Version: Focused on Tickets with No External Comments >7 Days"
+          echo "Version: Focused on Tickets Missing Recent External Comments"
           
           # Create URL encoding function
           urlencode() {
@@ -320,31 +320,35 @@ jobs:
           
           sleep 1
           
-          # NEW FOCUSED APPROACH: Look specifically for tickets with no external comments that are >7 days old
-          echo "Looking for tickets with no external comments older than 7 days..."
+          # UPDATED LOGIC: Look for tickets with NO RECENT external comments (either none at all or none in last 7 days)
+          echo "Looking for tickets with no recent external comments..."
           
-          # Get all tickets older than 7 days
-          OLDER_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND created < -7d"
-          OLDER_JQL_ENCODED=$(urlencode "$OLDER_JQL")
-          OLDER_URL="${JIRA_API_URL}?jql=${OLDER_JQL_ENCODED}&maxResults=100&fields=key"
+          # Get ALL open tickets - we need to check all of them, not just old ones
+          ALL_TICKETS_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled)"
+          ALL_TICKETS_JQL_ENCODED=$(urlencode "$ALL_TICKETS_JQL")
+          ALL_TICKETS_URL="${JIRA_API_URL}?jql=${ALL_TICKETS_JQL_ENCODED}&maxResults=1000&fields=key"
           
-          OLDER_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "$OLDER_URL")
-          OLDER_TICKET_KEYS=($(echo "$OLDER_RESPONSE" | jq -r '.issues[].key'))
-          OLDER_COUNT=${#OLDER_TICKET_KEYS[@]}
+          ALL_TICKETS_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "$ALL_TICKETS_URL")
+          ALL_TICKET_KEYS=($(echo "$ALL_TICKETS_RESPONSE" | jq -r '.issues[].key'))
+          ALL_TICKET_COUNT=${#ALL_TICKET_KEYS[@]}
           
-          echo "Found $OLDER_COUNT tickets older than 7 days to check for external comments"
+          echo "Checking $ALL_TICKET_COUNT total tickets for external comments..."
           
-          # Array to store tickets with no external comments
-          NO_EXTERNAL_COMMENTS=()
+          # Array to store tickets with no RECENT external comments
+          NO_RECENT_EXTERNAL_COMMENTS=()
           
-          # Process each ticket to check for external comments
-          for TICKET_KEY in "${OLDER_TICKET_KEYS[@]}"; do
+          # Calculate date 7 days ago for comparison
+          SEVEN_DAYS_AGO=$(date -d "7 days ago" +%s)
+          
+          # Process each ticket to check for recent external comments
+          for TICKET_KEY in "${ALL_TICKET_KEYS[@]}"; do
             # Fetch comments for this ticket
             COMMENT_URL="${JIRA_BASE_URL}/rest/api/3/issue/${TICKET_KEY}/comment"
             COMMENT_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "$COMMENT_URL")
             
-            # Check if this ticket has any external comments
-            HAS_EXTERNAL_COMMENT=false
+            # Initialize variables
+            HAS_RECENT_EXTERNAL_COMMENT=false
+            MOST_RECENT_EXTERNAL_DATE=""
             
             # Process comments if they exist
             if [[ $(echo "$COMMENT_RESPONSE" | jq 'has("comments")') == "true" ]]; then
@@ -352,45 +356,67 @@ jobs:
               COMMENT_COUNT=$(echo "$COMMENTS" | jq '. | length')
               
               if [ "$COMMENT_COUNT" -gt 0 ]; then
-                # Check each comment for jsdPublic: true (external comment)
+                # Loop through all comments to find external ones and track most recent
                 for (( k=0; k<COMMENT_COUNT; k++ )); do
                   COMMENT=$(echo "$COMMENTS" | jq ".[$k]")
                   
                   if [[ $(echo "$COMMENT" | jq 'has("jsdPublic")') == "true" ]]; then
                     IS_PUBLIC=$(echo "$COMMENT" | jq -r '.jsdPublic')
                     if [[ "$IS_PUBLIC" == "true" ]]; then
-                      HAS_EXTERNAL_COMMENT=true
-                      break
+                      COMMENT_DATE=$(echo "$COMMENT" | jq -r '.created')
+                      
+                      # Track the most recent external comment date
+                      if [[ -z "$MOST_RECENT_EXTERNAL_DATE" || "$COMMENT_DATE" > "$MOST_RECENT_EXTERNAL_DATE" ]]; then
+                        MOST_RECENT_EXTERNAL_DATE="$COMMENT_DATE"
+                      fi
                     fi
                   fi
                 done
+                
+                # Check if there was any external comment
+                if [ -n "$MOST_RECENT_EXTERNAL_DATE" ]; then
+                  # Convert to timestamp for comparison
+                  RECENT_TIMESTAMP=$(date -d "$MOST_RECENT_EXTERNAL_DATE" +%s)
+                  
+                  # Check if the most recent external comment is within the last 7 days
+                  if [ "$RECENT_TIMESTAMP" -ge "$SEVEN_DAYS_AGO" ]; then
+                    HAS_RECENT_EXTERNAL_COMMENT=true
+                  else
+                    echo "  $TICKET_KEY - Has external comments but all are older than 7 days"
+                    NO_RECENT_EXTERNAL_COMMENTS+=("$TICKET_KEY")
+                  fi
+                else
+                  echo "  $TICKET_KEY - No external comments found"
+                  NO_RECENT_EXTERNAL_COMMENTS+=("$TICKET_KEY")
+                fi
+              else
+                echo "  $TICKET_KEY - No comments at all"
+                NO_RECENT_EXTERNAL_COMMENTS+=("$TICKET_KEY")
               fi
-            fi
-            
-            # If no external comments found, add to our list
-            if [ "$HAS_EXTERNAL_COMMENT" = false ]; then
-              echo "  $TICKET_KEY - No external comments found"
-              NO_EXTERNAL_COMMENTS+=("$TICKET_KEY")
+            else
+              echo "  WARNING: Could not fetch comments for $TICKET_KEY"
+              # Assume worst case if we can't check
+              NO_RECENT_EXTERNAL_COMMENTS+=("$TICKET_KEY")
             fi
           done
           
-          # Check if we found any tickets with no external comments
-          NO_EXTERNAL_COUNT=${#NO_EXTERNAL_COMMENTS[@]}
+          # Check if we found any tickets with no recent external comments
+          NO_RECENT_EXTERNAL_COUNT=${#NO_RECENT_EXTERNAL_COMMENTS[@]}
           
           # Create a simple, focused report
-          if [ $NO_EXTERNAL_COUNT -gt 0 ]; then
+          if [ $NO_RECENT_EXTERNAL_COUNT -gt 0 ]; then
             # Create a CSV of the ticket numbers
-            NO_EXTERNAL_CSV=$(IFS=,; echo "${NO_EXTERNAL_COMMENTS[*]}")
+            NO_RECENT_EXTERNAL_CSV=$(IFS=,; echo "${NO_RECENT_EXTERNAL_COMMENTS[*]}")
             
             # Create the JQL query with issueKey
-            NO_EXT_JQL="issueKey in (${NO_EXTERNAL_CSV}) ORDER BY created DESC"
+            NO_EXT_JQL="issueKey in (${NO_RECENT_EXTERNAL_CSV}) ORDER BY created DESC"
             NO_EXT_JQL_ENCODED=$(urlencode "$NO_EXT_JQL")
             NO_EXT_LINK="${JIRA_BROWSE_URL}${NO_EXT_JQL_ENCODED}"
             
             # Create one-line message
-            STALE_MESSAGE="*Tickets With No External Comments (>7 days):* <${NO_EXT_LINK}|${NO_EXTERNAL_COUNT} tickets>"
+            STALE_MESSAGE="*Tickets With No Recent External Comments (>7 days):* <${NO_EXT_LINK}|${NO_RECENT_EXTERNAL_COUNT} tickets>"
           else
-            STALE_MESSAGE="*Tickets With No External Comments (>7 days):* 0 tickets"
+            STALE_MESSAGE="*Tickets With No Recent External Comments (>7 days):* 0 tickets"
           fi
           
           # Send to Slack
