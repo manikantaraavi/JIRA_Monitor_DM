@@ -33,7 +33,7 @@ jobs:
         run: |
           # Debug: Print version info
           echo "===== RUNNING JIRA MONITOR SCRIPT ====="
-          echo "Version: Fixed Modern JQL Stale Detection - Sateesh Only"
+          echo "Version: Improved JQL Stale Detection with External Comment Filtering - Sateesh Only"
           
           # Create URL encoding function
           urlencode() {
@@ -107,6 +107,13 @@ jobs:
           echo "Fetching tickets for $MEMBER..."
           ALL_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "$ALL_URL")
           
+          # Check for API errors
+          if echo "$ALL_RESPONSE" | jq -e '.errorMessages' > /dev/null; then
+            API_ERROR=$(echo "$ALL_RESPONSE" | jq -r '.errorMessages[0]')
+            echo "ERROR: JIRA API returned an error: $API_ERROR"
+            exit 1
+          fi
+          
           # Extract total count
           TOTAL_COUNT=$(jq -r '.total' <<< "$ALL_RESPONSE")
           TOTAL_OPEN_TICKETS=$TOTAL_COUNT
@@ -131,7 +138,7 @@ jobs:
               TICKET_KEY=$(jq -r '.key' <<< "$ISSUE")
               
               # Get the priority value from the nested JSON directly
-              PRIORITY_VALUE=$(jq -r ".fields.\"$PRIORITY_FIELD\".value" <<< "$ISSUE")
+              PRIORITY_VALUE=$(jq -r ".fields.\"$PRIORITY_FIELD\".value // \"Unknown\"" <<< "$ISSUE")
               
               # Debug the priority value to help diagnose issues
               echo "  Ticket: $TICKET_KEY | Priority Value: '$PRIORITY_VALUE'"
@@ -297,52 +304,200 @@ jobs:
             --data "{\"text\":\"$ESCAPED_WORKLOAD\"}" \
             ${{ secrets.SLACK_WEBHOOK_URL }}
           
-          # NEW: Use JQL to detect stale tickets instead of processing comments for each ticket
-          echo "Using JQL to identify potentially stale tickets..."
+          sleep 1
           
-          # Query for tickets not updated in the last 7 days (potentially stale)
-          STALE_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND updated < -7d"
+          # NEW: Enhanced stale ticket detection with external comment filtering
+          echo "Analyzing stale tickets with external comment filtering..."
+          
+          # Step 1: Get all potentially stale tickets using JQL
+          echo "Fetching potentially stale tickets..."
+          STALE_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND updated < -7d ORDER BY key ASC"
           STALE_JQL_ENCODED=$(urlencode "$STALE_JQL")
+          STALE_URL="${JIRA_API_URL}?jql=${STALE_JQL_ENCODED}&maxResults=100&fields=key,summary,created,updated"
           STALE_LINK="${JIRA_BROWSE_URL}${STALE_JQL_ENCODED}"
           
-          # Get count of potentially stale tickets
-          STALE_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "${JIRA_API_URL}?jql=${STALE_JQL_ENCODED}&maxResults=0")
-          POTENTIAL_STALE_COUNT=$(jq -r '.total' <<< "$STALE_RESPONSE")
+          STALE_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "$STALE_URL")
           
-          echo "Found $POTENTIAL_STALE_COUNT tickets not updated in the last 7 days (potentially stale)"
-          
-          # Query for tickets with no comments
-          NO_COMMENTS_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND comment is EMPTY"
-          NO_COMMENTS_JQL_ENCODED=$(urlencode "$NO_COMMENTS_JQL")
-          NO_COMMENTS_LINK="${JIRA_BROWSE_URL}${NO_COMMENTS_JQL_ENCODED}"
-          
-          # Get count of tickets without comments
-          NO_COMMENTS_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "${JIRA_API_URL}?jql=${NO_COMMENTS_JQL_ENCODED}&maxResults=0")
-          NO_COMMENTS_COUNT=$(jq -r '.total' <<< "$NO_COMMENTS_RESPONSE")
-          
-          echo "Found $NO_COMMENTS_COUNT tickets with no comments"
-          
-          # Create stale tickets message
-          STALE_MESSAGE="*Ticket Staleness Report for ${MEMBER}:*\n"
-          
-          # Add potentially stale tickets info
-          STALE_MESSAGE="${STALE_MESSAGE}• *Potentially Stale Tickets:* "
-          if [ "$POTENTIAL_STALE_COUNT" -gt 0 ]; then
-            STALE_MESSAGE="${STALE_MESSAGE}<${STALE_LINK}|${POTENTIAL_STALE_COUNT} tickets> not updated in the last 7 days\n"
-          else
-            STALE_MESSAGE="${STALE_MESSAGE}0 tickets not updated in the last 7 days\n"
+          # Check if the query was successful
+          if echo "$STALE_RESPONSE" | jq -e '.errorMessages' > /dev/null; then
+            echo "Warning: Standard stale JQL failed, trying alternative syntax..."
+            STALE_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND updatedDate < -7d ORDER BY key ASC"
+            STALE_JQL_ENCODED=$(urlencode "$STALE_JQL")
+            STALE_URL="${JIRA_API_URL}?jql=${STALE_JQL_ENCODED}&maxResults=100&fields=key,summary,created,updated"
+            STALE_LINK="${JIRA_BROWSE_URL}${STALE_JQL_ENCODED}"
+            
+            STALE_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "$STALE_URL")
+            
+            if echo "$STALE_RESPONSE" | jq -e '.errorMessages' > /dev/null; then
+              API_ERROR=$(echo "$STALE_RESPONSE" | jq -r '.errorMessages[0]')
+              echo "ERROR: JIRA API returned an error for stale ticket query: $API_ERROR"
+              
+              # Create a simple message in case of error
+              STALE_MESSAGE="*Stale Ticket Analysis for ${MEMBER}:*\n"
+              STALE_MESSAGE="${STALE_MESSAGE}• Unable to retrieve stale ticket information due to JQL error: $API_ERROR\n"
+              
+              # Send to Slack
+              ESCAPED_STALE=$(echo "$STALE_MESSAGE" | sed 's/"/\\"/g')
+              curl -s -X POST \
+                -H "Content-type: application/json" \
+                --data "{\"text\":\"$ESCAPED_STALE\"}" \
+                ${{ secrets.SLACK_WEBHOOK_URL }}
+                
+              echo "=== JIRA MONITOR COMPLETED WITH ERRORS ==="
+              exit 1
+            fi
           fi
           
-          # Add no comments tickets info
-          STALE_MESSAGE="${STALE_MESSAGE}• *Tickets With No Comments:* "
-          if [ "$NO_COMMENTS_COUNT" -gt 0 ]; then
-            STALE_MESSAGE="${STALE_MESSAGE}<${NO_COMMENTS_LINK}|${NO_COMMENTS_COUNT} tickets> have no comments\n"
+          # Extract ticket keys and get ticket count
+          TICKET_KEYS=($(echo "$STALE_RESPONSE" | jq -r '.issues[].key'))
+          TICKET_COUNT=${#TICKET_KEYS[@]}
+          
+          echo "Found $TICKET_COUNT potentially stale tickets"
+          
+          # If no tickets found, create a simple report
+          if [ $TICKET_COUNT -eq 0 ]; then
+            echo "No stale tickets to process"
+            
+            # Create a message for Slack
+            STALE_MESSAGE="*Stale Ticket Analysis for ${MEMBER}:*\n"
+            STALE_MESSAGE="${STALE_MESSAGE}• *Potentially Stale Tickets:* 0 tickets not updated in the last 7 days\n"
+            STALE_MESSAGE="${STALE_MESSAGE}• *Tickets With No External Comments:* 0 tickets have no external comments\n"
+            
+            # Send to Slack
+            ESCAPED_STALE=$(echo "$STALE_MESSAGE" | sed 's/"/\\"/g')
+            curl -s -X POST \
+              -H "Content-type: application/json" \
+              --data "{\"text\":\"$ESCAPED_STALE\"}" \
+              ${{ secrets.SLACK_WEBHOOK_URL }}
+              
+            echo "=== JIRA MONITOR COMPLETED SUCCESSFULLY ==="
+            exit 0
+          fi
+          
+          # Step 2: Process each ticket to check for external comments
+          echo "Analyzing comments for $TICKET_COUNT tickets..."
+          
+          # Arrays to store filtered ticket lists
+          NO_EXTERNAL_COMMENTS=()
+          NO_EXTERNAL_COMMENTS_7DAYS=()
+          
+          # Process each ticket
+          for TICKET_KEY in "${TICKET_KEYS[@]}"; do
+            echo "Processing ticket: $TICKET_KEY"
+            
+            # Fetch comments for this ticket
+            COMMENT_URL="${JIRA_BASE_URL}/rest/api/3/issue/${TICKET_KEY}/comment"
+            COMMENT_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "$COMMENT_URL")
+            
+            # Initialize flags
+            HAS_EXTERNAL_COMMENT=false
+            HAS_RECENT_EXTERNAL_COMMENT=false
+            MOST_RECENT_EXTERNAL_DATE=""
+            
+            # Check if we can retrieve comments
+            if [[ $(echo "$COMMENT_RESPONSE" | jq 'has("comments")') == "true" ]]; then
+              COMMENTS=$(echo "$COMMENT_RESPONSE" | jq '.comments')
+              COMMENT_COUNT=$(echo "$COMMENTS" | jq '. | length')
+              
+              if [ "$COMMENT_COUNT" -gt 0 ]; then
+                # Process all comments to find external ones (jsdPublic: true)
+                for (( k=0; k<COMMENT_COUNT; k++ )); do
+                  COMMENT=$(echo "$COMMENTS" | jq ".[$k]")
+                  
+                  # Check if jsdPublic exists and is true (external comment)
+                  if [[ $(echo "$COMMENT" | jq 'has("jsdPublic")') == "true" ]]; then
+                    IS_PUBLIC=$(echo "$COMMENT" | jq -r '.jsdPublic')
+                    if [[ "$IS_PUBLIC" == "true" ]]; then
+                      HAS_EXTERNAL_COMMENT=true
+                      COMMENT_DATE=$(echo "$COMMENT" | jq -r '.created')
+                      
+                      # Track the most recent external comment date
+                      if [[ -z "$MOST_RECENT_EXTERNAL_DATE" || "$COMMENT_DATE" > "$MOST_RECENT_EXTERNAL_DATE" ]]; then
+                        MOST_RECENT_EXTERNAL_DATE="$COMMENT_DATE"
+                      fi
+                    fi
+                  fi
+                done
+                
+                # If we found external comments, check if the most recent one is older than 7 days
+                if [ "$HAS_EXTERNAL_COMMENT" = true ]; then
+                  RECENT_TIMESTAMP=$(date -d "$MOST_RECENT_EXTERNAL_DATE" +%s)
+                  CURRENT_TIMESTAMP=$(date +%s)
+                  DAYS_SINCE_COMMENT=$(( (CURRENT_TIMESTAMP - RECENT_TIMESTAMP) / 86400 ))
+                  
+                  if [ "$DAYS_SINCE_COMMENT" -le 7 ]; then
+                    HAS_RECENT_EXTERNAL_COMMENT=true
+                  else
+                    echo "  $TICKET_KEY - External comment is older than 7 days ($DAYS_SINCE_COMMENT days old)"
+                    NO_EXTERNAL_COMMENTS_7DAYS+=("$TICKET_KEY")
+                  fi
+                else
+                  echo "  $TICKET_KEY - No external comments found"
+                  NO_EXTERNAL_COMMENTS+=("$TICKET_KEY")
+                fi
+              else
+                echo "  $TICKET_KEY - No comments at all"
+                NO_EXTERNAL_COMMENTS+=("$TICKET_KEY")
+              fi
+            else
+              echo "  WARNING: Could not fetch comments for $TICKET_KEY"
+            fi
+          done
+          
+          # Step 3: Create CSV lists of ticket numbers for reporting
+          NO_EXTERNAL_CSV=$(IFS=,; echo "${NO_EXTERNAL_COMMENTS[*]}")
+          NO_RECENT_EXTERNAL_CSV=$(IFS=,; echo "${NO_EXTERNAL_COMMENTS_7DAYS[*]}")
+          
+          # Step 4: Create links to JQL queries for these ticket lists
+          NO_EXTERNAL_COUNT=${#NO_EXTERNAL_COMMENTS[@]}
+          NO_RECENT_EXTERNAL_COUNT=${#NO_EXTERNAL_COMMENTS_7DAYS[@]}
+          
+          if [ $NO_EXTERNAL_COUNT -gt 0 ]; then
+            # Create a JQL query specifically for tickets with no external comments
+            NO_EXT_JQL="key in (${NO_EXTERNAL_CSV}) ORDER BY key ASC"
+            NO_EXT_JQL_ENCODED=$(urlencode "$NO_EXT_JQL")
+            NO_EXT_LINK="${JIRA_BROWSE_URL}${NO_EXT_JQL_ENCODED}"
+            
+            echo "JQL for tickets with no external comments: $NO_EXT_JQL"
           else
-            STALE_MESSAGE="${STALE_MESSAGE}0 tickets have no comments\n"
+            NO_EXT_LINK=""
+          fi
+          
+          if [ $NO_RECENT_EXTERNAL_COUNT -gt 0 ]; then
+            # Create a JQL query for tickets with old external comments
+            OLD_EXT_JQL="key in (${NO_RECENT_EXTERNAL_CSV}) ORDER BY key ASC"
+            OLD_EXT_JQL_ENCODED=$(urlencode "$OLD_EXT_JQL")
+            OLD_EXT_LINK="${JIRA_BROWSE_URL}${OLD_EXT_JQL_ENCODED}"
+            
+            echo "JQL for tickets with old external comments: $OLD_EXT_JQL"
+          else
+            OLD_EXT_LINK=""
+          fi
+          
+          # Step 5: Create Slack message with the results
+          STALE_MESSAGE="*Stale Ticket Analysis for ${MEMBER}:*\n"
+          STALE_MESSAGE="${STALE_MESSAGE}• *Potentially Stale Tickets:* <${STALE_LINK}|${TICKET_COUNT} tickets> not updated in the last 7 days\n"
+          
+          # Add no external comments info
+          STALE_MESSAGE="${STALE_MESSAGE}• *Tickets With No External Comments:* "
+          if [ $NO_EXTERNAL_COUNT -gt 0 ]; then
+            STALE_MESSAGE="${STALE_MESSAGE}<${NO_EXT_LINK}|${NO_EXTERNAL_COUNT} tickets>\n"
+            STALE_MESSAGE="${STALE_MESSAGE}  ↳ Ticket Numbers: ${NO_EXTERNAL_CSV}\n"
+          else
+            STALE_MESSAGE="${STALE_MESSAGE}0 tickets\n"
+          fi
+          
+          # Add old external comments info
+          STALE_MESSAGE="${STALE_MESSAGE}• *Tickets With Stale External Comments (>7 days):* "
+          if [ $NO_RECENT_EXTERNAL_COUNT -gt 0 ]; then
+            STALE_MESSAGE="${STALE_MESSAGE}<${OLD_EXT_LINK}|${NO_RECENT_EXTERNAL_COUNT} tickets>\n"
+            STALE_MESSAGE="${STALE_MESSAGE}  ↳ Ticket Numbers: ${NO_RECENT_EXTERNAL_CSV}\n"
+          else
+            STALE_MESSAGE="${STALE_MESSAGE}0 tickets\n"
           fi
           
           # Send to Slack
-          echo "Sending stale tickets info to Slack..."
+          echo "Sending stale ticket analysis to Slack..."
           ESCAPED_STALE=$(echo "$STALE_MESSAGE" | sed 's/"/\\"/g')
           curl -s -X POST \
             -H "Content-type: application/json" \
