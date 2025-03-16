@@ -1,179 +1,352 @@
-name: test-slack-upload-debug
+name: jira-ticket-monitor
 
 on:
-  workflow_dispatch:  # This allows manual triggering from GitHub UI
+  schedule:
+    - cron: '30 4 * * 1-5'
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/jira-ticket-monitor.yml'
+
+concurrency:
+  group: jira-ticket-monitor
+  cancel-in-progress: true
+
+env:
+  TZ: 'Asia/Kolkata'
 
 jobs:
-  test-slack-upload:
+  monitor-jira-tickets:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: Check for jq
+      - name: Check environment
         run: |
-          if ! command -v jq &> /dev/null; then
-            echo "Installing jq..."
-            sudo apt-get update
-            sudo apt-get install -y jq
-          fi
-          jq --version
-
-      - name: Test Slack File Upload
+          echo "Runner: $RUNNER_OS"
+          echo "Free space:"
+          df -h
+          echo "Memory info:"
+          free -h
+            
+      - name: Monitor JIRA Tickets
+        id: jira-monitor
         run: |
-          echo "===== SLACK FILE UPLOAD TEST ====="
+          # Debug: Print version info
+          echo "===== RUNNING JIRA MONITOR SCRIPT ====="
+          echo "Version: Fixed Modern JQL Stale Detection - Sateesh Only"
           
-          # Create a test file
-          echo "This is a test file for Slack upload." > test_file.txt
-          echo "Created at: $(date)" >> test_file.txt
-          echo "This file tests the Slack files.getUploadURLExternal API." >> test_file.txt
-          
-          # Show file content and size
-          echo "File content:"
-          cat test_file.txt
-          FILE_SIZE=$(wc -c < test_file.txt)
-          echo "File size: $FILE_SIZE bytes"
-          
-          # Check token format (safely)
-          TOKEN="${{ secrets.SLACK_BOT_TOKEN }}"
-          TOKEN_PREFIX="${TOKEN:0:5}"
-          TOKEN_LENGTH=${#TOKEN}
-          
-          echo "Token prefix: ${TOKEN_PREFIX}"
-          echo "Token length: ${TOKEN_LENGTH} characters"
-          
-          if [[ ! "$TOKEN_PREFIX" == "xoxb-" ]]; then
-            echo "⚠️ WARNING: Token doesn't start with 'xoxb-'. Please check your Bot Token format."
-            echo "Slack Bot tokens should start with 'xoxb-'. User tokens and webhook URLs won't work."
-          fi
-          
-          # Test token validity with a simple auth.test call
-          echo -e "\nVerifying token with auth.test API..."
-          AUTH_RESPONSE=$(curl -s -X POST \
-            -H "Authorization: Bearer $TOKEN" \
-            "https://slack.com/api/auth.test")
-          
-          echo "Auth test response:"
-          echo "$AUTH_RESPONSE" | jq '.'
-          
-          if [[ $(echo "$AUTH_RESPONSE" | jq -r '.ok') == "true" ]]; then
-            echo "✅ Token is valid! Authorized as: $(echo "$AUTH_RESPONSE" | jq -r '.user')"
-            echo "Bot ID: $(echo "$AUTH_RESPONSE" | jq -r '.user_id')"
-            echo "Team: $(echo "$AUTH_RESPONSE" | jq -r '.team')"
-          else
-            echo "❌ Token validation failed: $(echo "$AUTH_RESPONSE" | jq -r '.error')"
-            echo "Please check your SLACK_BOT_TOKEN secret."
-            exit 1
-          fi
-          
-          # Check channel format
-          CHANNEL_ID="${{ secrets.SLACK_CHANNEL_ID }}"
-          if [[ ! "$CHANNEL_ID" =~ ^[CD][A-Z0-9]{8,}$ ]]; then
-            echo "⚠️ WARNING: Channel ID format doesn't appear to be valid."
-            echo "Channel ID: $CHANNEL_ID"
-            echo "Should start with C (channel) or D (DM) followed by alphanumeric characters."
-          fi
-          
-          # Step 1: Get upload URL from Slack - use explicit format
-          echo -e "\nStep 1: Getting upload URL from Slack..."
-          
-          # Create JSON file for request (more reliable than inline JSON)
-          cat > request.json << EOL
-{"filename":"test_file.txt","length":$FILE_SIZE}
-EOL
-          
-          echo "Request payload (from file):"
-          cat request.json
-          
-          UPLOAD_URL_RESPONSE=$(curl -v -X POST \
-            -H "Authorization: Bearer $TOKEN" \
-            -H "Content-Type: application/json" \
-            --data @request.json \
-            "https://slack.com/api/files.getUploadURLExternal" 2>&1)
-          
-          echo "Full curl verbose output:"
-          echo "$UPLOAD_URL_RESPONSE"
-          
-          # Extract just the JSON response body
-          RESPONSE_BODY=$(echo "$UPLOAD_URL_RESPONSE" | grep -A 1000 '< HTTP/' | sed '1,/^{/s/^[^{]*//' | sed -n '/^{/,/^}/p')
-          
-          echo "Extracted JSON response:"
-          echo "$RESPONSE_BODY"
-          
-          if echo "$RESPONSE_BODY" | grep -q '"ok":true'; then
-            echo "✅ Successfully got upload URL"
+          # Create URL encoding function
+          urlencode() {
+            local string="${1}"
+            local strlen=${#string}
+            local encoded=""
+            local pos c o
             
-            # Extract values using grep/sed since jq might not work with the mixed output
-            UPLOAD_URL=$(echo "$RESPONSE_BODY" | grep -o '"upload_url":"[^"]*"' | sed 's/"upload_url":"//;s/"//')
-            FILE_ID=$(echo "$RESPONSE_BODY" | grep -o '"file_id":"[^"]*"' | sed 's/"file_id":"//;s/"//')
+            for (( pos=0 ; pos<strlen ; pos++ )); do
+              c=${string:$pos:1}
+              case "$c" in
+                [-_.~a-zA-Z0-9] ) o="${c}" ;;
+                * ) printf -v o '%%%02x' "'$c"
+              esac
+              encoded+="${o}"
+            done
+            echo "${encoded}"
+          }
+          
+          # JIRA Base URL for API and hyperlinks
+          JIRA_BASE_URL="https://quantium.atlassian.net"
+          JIRA_API_URL="${JIRA_BASE_URL}/rest/api/3/search"
+          JIRA_BROWSE_URL="${JIRA_BASE_URL}/issues/?jql="
+          
+          # Jira API credentials
+          AUTH_HEADER="Authorization: Basic ${{ secrets.JIRA_API_TOKEN }}"
+          ACCEPT_HEADER="Accept: application/json"
+          
+          # Only Sateesh Gulivindala for this test
+          MEMBER="Sateesh Gulivindala"
+          echo "Monitoring tickets for: $MEMBER"
+          
+          # We've identified customfield_10065 as having the correct priority values
+          PRIORITY_FIELD="customfield_10065"
+          echo "Using PRIORITY_FIELD=$PRIORITY_FIELD for priorities"
+          
+          # Based on findings, define priorities as found in JIRA
+          PRIORITY_NAMES=("1 - Critical" "2 - High" "3 - Medium" "4 - Low" "5 - Very Low")
+          PRIORITY_SHORT=("P1" "P2" "P3" "P4" "P5")
+          
+          # Age categories without emojis
+          AGE_CATEGORIES=("≤7 days" "8-30 days" ">30 days")
+          
+          # Variables for tracking tickets
+          TOTAL_OPEN_TICKETS=0
+          PRIORITY_COUNTS=()
+          for i in {0..4}; do
+            PRIORITY_COUNTS[$i]=0
+          done
+          UNDEFINED_PRIORITY_COUNT=0
+          
+          # Time in IST and Sydney
+          IST_TIME=$(date +"%I:%M %p IST")
+          IST_DATE=$(date +"%d-%m-%Y")
+          SYDNEY_TIME=$(TZ='Australia/Sydney' date +"%I:%M %p AEDT")
+          
+          # Build header part
+          HEADER="📊 *JIRA Monitor (Sateesh Only)*"
+          
+          # Create team-wide JQL for all tickets
+          ALL_TEAM_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled)"
+          ALL_TEAM_LINK="${JIRA_BROWSE_URL}$(urlencode "$ALL_TEAM_JQL")"
+          
+          # First query: All open tickets using the standard format
+          ALL_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled)"
+          ALL_JQL_ENCODED=$(urlencode "$ALL_JQL")
+          ALL_URL="${JIRA_API_URL}?jql=${ALL_JQL_ENCODED}&maxResults=1000&fields=${PRIORITY_FIELD},summary,created,updated"
+          ALL_LINK="${JIRA_BROWSE_URL}${ALL_JQL_ENCODED}"
+          
+          # Fetch all tickets with the priority field
+          echo "Fetching tickets for $MEMBER..."
+          ALL_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "$ALL_URL")
+          
+          # Extract total count
+          TOTAL_COUNT=$(jq -r '.total' <<< "$ALL_RESPONSE")
+          TOTAL_OPEN_TICKETS=$TOTAL_COUNT
+          echo "Found $TOTAL_COUNT total tickets"
+          
+          # Initialize counts
+          MEMBER_PRIORITY_COUNTS=()
+          for i in {0..4}; do
+            MEMBER_PRIORITY_COUNTS[$i]=0
+          done
+          MEMBER_UNDEFINED_COUNT=0
+          
+          if [ "$TOTAL_COUNT" -gt 0 ]; then
+            # Parse all tickets to count priorities
+            ISSUES=$(jq '.issues' <<< "$ALL_RESPONSE")
             
-            echo "Upload URL: $UPLOAD_URL"
-            echo "File ID: $FILE_ID"
+            # Go through each ticket and examine its priority value
+            ISSUE_COUNT=$(jq '. | length' <<< "$ISSUES")
             
-            # Step 2: Upload the file to the provided URL
-            echo -e "\nStep 2: Uploading file to the provided URL..."
+            for (( j=0; j<ISSUE_COUNT; j++ )); do
+              ISSUE=$(jq ".[$j]" <<< "$ISSUES")
+              TICKET_KEY=$(jq -r '.key' <<< "$ISSUE")
+              
+              # Get the priority value from the nested JSON directly
+              PRIORITY_VALUE=$(jq -r ".fields.\"$PRIORITY_FIELD\".value" <<< "$ISSUE")
+              
+              # Debug the priority value to help diagnose issues
+              echo "  Ticket: $TICKET_KEY | Priority Value: '$PRIORITY_VALUE'"
+              
+              # Count based on the exact priority value pattern
+              if [[ "$PRIORITY_VALUE" == "1 - Critical" ]]; then
+                MEMBER_PRIORITY_COUNTS[0]=$((MEMBER_PRIORITY_COUNTS[0] + 1))
+                PRIORITY_COUNTS[0]=$((PRIORITY_COUNTS[0] + 1))
+              elif [[ "$PRIORITY_VALUE" == "2 - High" ]]; then
+                MEMBER_PRIORITY_COUNTS[1]=$((MEMBER_PRIORITY_COUNTS[1] + 1))
+                PRIORITY_COUNTS[1]=$((PRIORITY_COUNTS[1] + 1))
+              elif [[ "$PRIORITY_VALUE" == "3 - Medium" ]]; then
+                MEMBER_PRIORITY_COUNTS[2]=$((MEMBER_PRIORITY_COUNTS[2] + 1))
+                PRIORITY_COUNTS[2]=$((PRIORITY_COUNTS[2] + 1))
+              elif [[ "$PRIORITY_VALUE" == "4 - Low" ]]; then
+                MEMBER_PRIORITY_COUNTS[3]=$((MEMBER_PRIORITY_COUNTS[3] + 1))
+                PRIORITY_COUNTS[3]=$((PRIORITY_COUNTS[3] + 1))
+              elif [[ "$PRIORITY_VALUE" == "5 - Very Low" ]]; then
+                MEMBER_PRIORITY_COUNTS[4]=$((MEMBER_PRIORITY_COUNTS[4] + 1))
+                PRIORITY_COUNTS[4]=$((PRIORITY_COUNTS[4] + 1))
+              else
+                # Default to P3 if unknown, but also track undefined separately
+                MEMBER_PRIORITY_COUNTS[2]=$((MEMBER_PRIORITY_COUNTS[2] + 1))
+                PRIORITY_COUNTS[2]=$((PRIORITY_COUNTS[2] + 1))
+                
+                # Increment undefined counters
+                MEMBER_UNDEFINED_COUNT=$((MEMBER_UNDEFINED_COUNT + 1))
+                UNDEFINED_PRIORITY_COUNT=$((UNDEFINED_PRIORITY_COUNT + 1))
+                
+                echo "  NOTE: Ticket with undefined priority counted as P3: $TICKET_KEY"
+              fi
+            done
             
-            UPLOAD_RESPONSE=$(curl -v -X PUT \
-              -H "Content-Type: text/plain" \
-              --data-binary "@test_file.txt" \
-              "$UPLOAD_URL" 2>&1)
+            # Format age breakdown
+            WEEK_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND created >= -7d"
+            WEEK_JQL_ENCODED=$(urlencode "$WEEK_JQL")
+            WEEK_LINK="${JIRA_BROWSE_URL}${WEEK_JQL_ENCODED}"
+            WEEK_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "${JIRA_API_URL}?jql=${WEEK_JQL_ENCODED}&maxResults=0")
+            WEEK_COUNT=$(jq -r '.total' <<< "$WEEK_RESPONSE")
             
-            echo "Upload response:"
-            echo "$UPLOAD_RESPONSE"
+            MONTH_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND created < -7d AND created >= -30d"
+            MONTH_JQL_ENCODED=$(urlencode "$MONTH_JQL")
+            MONTH_LINK="${JIRA_BROWSE_URL}${MONTH_JQL_ENCODED}"
+            MONTH_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "${JIRA_API_URL}?jql=${MONTH_JQL_ENCODED}&maxResults=0")
+            MONTH_COUNT=$(jq -r '.total' <<< "$MONTH_RESPONSE")
             
-            # Step 3: Complete the upload process
-            echo -e "\nStep 3: Completing the upload process..."
+            OLDER_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND created < -30d"
+            OLDER_JQL_ENCODED=$(urlencode "$OLDER_JQL")
+            OLDER_LINK="${JIRA_BROWSE_URL}${OLDER_JQL_ENCODED}"
+            OLDER_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "${JIRA_API_URL}?jql=${OLDER_JQL_ENCODED}&maxResults=0")
+            OLDER_COUNT=$(jq -r '.total' <<< "$OLDER_RESPONSE")
             
-            # Create completion JSON file
-            cat > complete.json << EOL
-{"files":[{"id":"$FILE_ID","title":"Test File Upload"}],"channel_id":"$CHANNEL_ID"}
-EOL
+            # Format message for Sateesh
+            MEMBER_MESSAGE="• *${MEMBER}:* <${ALL_LINK}|${TOTAL_COUNT}>"
+            MEMBER_MESSAGE="${MEMBER_MESSAGE}\n  ↳ Priority: "
             
-            echo "Complete request payload:"
-            cat complete.json
+            for i in {0..4}; do
+              if [ $i -gt 0 ]; then
+                MEMBER_MESSAGE="${MEMBER_MESSAGE} | "
+              fi
+              
+              if [ ${MEMBER_PRIORITY_COUNTS[$i]} -gt 0 ]; then
+                MEMBER_MESSAGE="${MEMBER_MESSAGE}${PRIORITY_SHORT[$i]}: ${MEMBER_PRIORITY_COUNTS[$i]}"
+              else
+                MEMBER_MESSAGE="${MEMBER_MESSAGE}${PRIORITY_SHORT[$i]}: ${MEMBER_PRIORITY_COUNTS[$i]}"
+              fi
+            done
             
-            COMPLETE_RESPONSE=$(curl -s -X POST \
-              -H "Authorization: Bearer $TOKEN" \
-              -H "Content-Type: application/json" \
-              --data @complete.json \
-              "https://slack.com/api/files.completeUploadExternal")
+            # Add age breakdown to the message
+            MEMBER_MESSAGE="${MEMBER_MESSAGE}\n  ↳ Age: "
             
-            echo "Complete response:"
-            echo "$COMPLETE_RESPONSE" | jq '.' || echo "$COMPLETE_RESPONSE"
-            
-            if echo "$COMPLETE_RESPONSE" | grep -q '"ok":true'; then
-              echo "✅ SUCCESS: File successfully uploaded to Slack!"
+            if [ "$WEEK_COUNT" -gt 0 ]; then
+              MEMBER_MESSAGE="${MEMBER_MESSAGE}<${WEEK_LINK}|${WEEK_COUNT}> (≤7d)"
             else
-              echo "❌ ERROR: Failed to complete upload"
-              echo "$COMPLETE_RESPONSE"
+              MEMBER_MESSAGE="${MEMBER_MESSAGE}${WEEK_COUNT} (≤7d)"
+            fi
+            
+            MEMBER_MESSAGE="${MEMBER_MESSAGE} | "
+            
+            if [ "$MONTH_COUNT" -gt 0 ]; then
+              MEMBER_MESSAGE="${MEMBER_MESSAGE}<${MONTH_LINK}|${MONTH_COUNT}> (8-30d)"
+            else
+              MEMBER_MESSAGE="${MEMBER_MESSAGE}${MONTH_COUNT} (8-30d)"
+            fi
+            
+            MEMBER_MESSAGE="${MEMBER_MESSAGE} | "
+            
+            if [ "$OLDER_COUNT" -gt 0 ]; then
+              MEMBER_MESSAGE="${MEMBER_MESSAGE}<${OLDER_LINK}|${OLDER_COUNT}> (>30d)"
+            else
+              MEMBER_MESSAGE="${MEMBER_MESSAGE}${OLDER_COUNT} (>30d)"
             fi
           else
-            echo "❌ ERROR: Failed to get upload URL"
-            
-            if echo "$RESPONSE_BODY" | grep -q "invalid_arguments"; then
-              echo "The API is reporting missing required fields, but we included them."
-              echo "This often happens when:"
-              echo "1. The token doesn't have the 'files:write' scope"
-              echo "2. The request is malformed or being rejected by Slack"
-            fi
-            
-            # Show scopes if we can get them
-            echo -e "\nAttempting to check token scopes..."
-            SCOPES_RESPONSE=$(curl -s -X POST \
-              -H "Authorization: Bearer $TOKEN" \
-              "https://slack.com/api/auth.test")
-            
-            if [[ $(echo "$SCOPES_RESPONSE" | jq -r '.ok') == "true" ]]; then
-              BOT_ID=$(echo "$SCOPES_RESPONSE" | jq -r '.user_id')
-              
-              # Try to get bot info
-              BOT_INFO=$(curl -s -X POST \
-                -H "Authorization: Bearer $TOKEN" \
-                -d "bot=$BOT_ID" \
-                "https://slack.com/api/bots.info")
-              
-              echo "Bot info response:"
-              echo "$BOT_INFO" | jq '.'
-            fi
+            # No tickets for Sateesh
+            MEMBER_MESSAGE="• *${MEMBER}:* 0"
           fi
           
-          # Clean up
-          rm -f test_file.txt request.json complete.json
-          echo "===== TEST COMPLETE ====="
+          # Fix the age legend hyperlinks
+          TEAM_WEEK_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND created >= -7d"
+          TEAM_WEEK_LINK="${JIRA_BROWSE_URL}$(urlencode "$TEAM_WEEK_JQL")"
+          
+          TEAM_MONTH_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND created < -7d AND created >= -30d"
+          TEAM_MONTH_LINK="${JIRA_BROWSE_URL}$(urlencode "$TEAM_MONTH_JQL")"
+          
+          TEAM_OLDER_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND created < -30d"
+          TEAM_OLDER_LINK="${JIRA_BROWSE_URL}$(urlencode "$TEAM_OLDER_JQL")"
+          
+          # Build the summary message
+          SUMMARY_MESSAGE="$HEADER\n\n*Summary:*"
+          
+          # Plain text summary with hyperlink for total tickets and time zones
+          SUMMARY_MESSAGE="$SUMMARY_MESSAGE\n• *JIRA Status Update* ($SYDNEY_TIME / $IST_TIME)"
+          SUMMARY_MESSAGE="$SUMMARY_MESSAGE\n• *Open Tickets:* <${ALL_TEAM_LINK}|${TOTAL_OPEN_TICKETS}>"
+          
+          # Add priority breakdown with hyperlinks to specific priority searches
+          PRIORITY_SUMMARY="\n• *Priority Breakdown:* "
+          for i in {0..4}; do
+            if [ $i -gt 0 ]; then
+              PRIORITY_SUMMARY="${PRIORITY_SUMMARY} | "
+            fi
+            if [ ${PRIORITY_COUNTS[$i]} -gt 0 ]; then
+              PRIORITY_SUMMARY="${PRIORITY_SUMMARY}${PRIORITY_SHORT[$i]}: ${PRIORITY_COUNTS[$i]}"
+            else
+              PRIORITY_SUMMARY="${PRIORITY_SUMMARY}${PRIORITY_SHORT[$i]}: ${PRIORITY_COUNTS[$i]}"
+            fi
+          done
+          
+          SUMMARY_MESSAGE="$SUMMARY_MESSAGE$PRIORITY_SUMMARY"
+          
+          # Create age legend
+          AGE_LEGEND="📊 *Legend:* <${TEAM_WEEK_LINK}|≤7 days> | <${TEAM_MONTH_LINK}|8-30 days> | <${TEAM_OLDER_LINK}|30+ days>"
+          
+          # Create one group for legend and notes
+          LEGEND_GROUP="$AGE_LEGEND"
+          
+          # Add note about undefined priorities to the same group
+          if [ ${UNDEFINED_PRIORITY_COUNT} -gt 0 ]; then
+            LEGEND_GROUP="$LEGEND_GROUP\n\n⚠️ *Note:* Undefined priorities (${UNDEFINED_PRIORITY_COUNT}) are counted under P3."
+          fi
+          
+          # Add the grouped legend to summary message
+          SUMMARY_MESSAGE="$SUMMARY_MESSAGE\n\n$LEGEND_GROUP"
+          
+          echo "Sending summary message to Slack..."
+          
+          # Send the summary message first
+          ESCAPED_SUMMARY=$(echo "$SUMMARY_MESSAGE" | sed 's/"/\\"/g')
+          curl -s -X POST \
+            -H "Content-type: application/json" \
+            --data "{\"text\":\"$ESCAPED_SUMMARY\"}" \
+            ${{ secrets.SLACK_WEBHOOK_URL }}
+          
+          # Sleep to ensure messages are sent in order
+          sleep 1
+          
+          # Send workload message for Sateesh
+          WORKLOAD_MESSAGE="*Workload for ${MEMBER}:*\n${MEMBER_MESSAGE}"
+          
+          echo "Sending workload message to Slack..."
+          ESCAPED_WORKLOAD=$(echo "$WORKLOAD_MESSAGE" | sed 's/"/\\"/g')
+          curl -s -X POST \
+            -H "Content-type: application/json" \
+            --data "{\"text\":\"$ESCAPED_WORKLOAD\"}" \
+            ${{ secrets.SLACK_WEBHOOK_URL }}
+          
+          # NEW: Use JQL to detect stale tickets instead of processing comments for each ticket
+          echo "Using JQL to identify potentially stale tickets..."
+          
+          # Query for tickets not updated in the last 7 days (potentially stale)
+          STALE_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND updated < -7d"
+          STALE_JQL_ENCODED=$(urlencode "$STALE_JQL")
+          STALE_LINK="${JIRA_BROWSE_URL}${STALE_JQL_ENCODED}"
+          
+          # Get count of potentially stale tickets
+          STALE_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "${JIRA_API_URL}?jql=${STALE_JQL_ENCODED}&maxResults=0")
+          POTENTIAL_STALE_COUNT=$(jq -r '.total' <<< "$STALE_RESPONSE")
+          
+          echo "Found $POTENTIAL_STALE_COUNT tickets not updated in the last 7 days (potentially stale)"
+          
+          # Query for tickets with no comments
+          NO_COMMENTS_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND comment is EMPTY"
+          NO_COMMENTS_JQL_ENCODED=$(urlencode "$NO_COMMENTS_JQL")
+          NO_COMMENTS_LINK="${JIRA_BROWSE_URL}${NO_COMMENTS_JQL_ENCODED}"
+          
+          # Get count of tickets without comments
+          NO_COMMENTS_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "${JIRA_API_URL}?jql=${NO_COMMENTS_JQL_ENCODED}&maxResults=0")
+          NO_COMMENTS_COUNT=$(jq -r '.total' <<< "$NO_COMMENTS_RESPONSE")
+          
+          echo "Found $NO_COMMENTS_COUNT tickets with no comments"
+          
+          # Create stale tickets message
+          STALE_MESSAGE="*Ticket Staleness Report for ${MEMBER}:*\n"
+          
+          # Add potentially stale tickets info
+          STALE_MESSAGE="${STALE_MESSAGE}• *Potentially Stale Tickets:* "
+          if [ "$POTENTIAL_STALE_COUNT" -gt 0 ]; then
+            STALE_MESSAGE="${STALE_MESSAGE}<${STALE_LINK}|${POTENTIAL_STALE_COUNT} tickets> not updated in the last 7 days\n"
+          else
+            STALE_MESSAGE="${STALE_MESSAGE}0 tickets not updated in the last 7 days\n"
+          fi
+          
+          # Add no comments tickets info
+          STALE_MESSAGE="${STALE_MESSAGE}• *Tickets With No Comments:* "
+          if [ "$NO_COMMENTS_COUNT" -gt 0 ]; then
+            STALE_MESSAGE="${STALE_MESSAGE}<${NO_COMMENTS_LINK}|${NO_COMMENTS_COUNT} tickets> have no comments\n"
+          else
+            STALE_MESSAGE="${STALE_MESSAGE}0 tickets have no comments\n"
+          fi
+          
+          # Send to Slack
+          echo "Sending stale tickets info to Slack..."
+          ESCAPED_STALE=$(echo "$STALE_MESSAGE" | sed 's/"/\\"/g')
+          curl -s -X POST \
+            -H "Content-type: application/json" \
+            --data "{\"text\":\"$ESCAPED_STALE\"}" \
+            ${{ secrets.SLACK_WEBHOOK_URL }}
+          
+          echo "=== JIRA MONITOR COMPLETED SUCCESSFULLY ==="
