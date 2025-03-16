@@ -1,129 +1,164 @@
-name: sateesh-comments-monitor
+# New function to check for stale tickets (no external comments for 7+ days)
+# This should be added to the jira-ticket-monitor.yml workflow after the existing monitoring section
 
-on:
-  schedule:
-    - cron: '30 4 * * 1-5'  # 10:00 AM AET / 4:30 AM IST on weekdays
-  workflow_dispatch:  # Allow manual triggering
+# Add this section after the team workload section and before the final curl command
 
-env:
-  TZ: "Asia/Kolkata"  # Set timezone to IST for the entire workflow
+echo "=== Checking for stale tickets (no external comments for 7+ days) ==="
 
-jobs:
-  monitor-sateesh-comments:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-        with:
-          fetch-depth: 1
+# Create JQL for all open team tickets
+STALE_JQL="(${TEAM_MEMBERS_CLAUSE}) AND status NOT IN (Closed, Resolved, Cancelled)"
+STALE_JQL_ENCODED=$(urlencode "$STALE_JQL")
+STALE_URL="${JIRA_API_URL}?jql=${STALE_JQL_ENCODED}&maxResults=1000&fields=key,summary,assignee,updated,comment,created"
+STALE_LINK="${JIRA_BROWSE_URL}${STALE_JQL_ENCODED}"
+
+# Fetch all tickets with comment fields
+STALE_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "$STALE_URL")
+
+# Initialize stale tickets count and list
+STALE_TICKETS=0
+STALE_TICKETS_LIST=""
+CURRENT_DATE=$(date +%s)
+SEVEN_DAYS_IN_SECONDS=$((7 * 24 * 60 * 60))
+
+# Create CSV data variable
+CSV_CONTENT="Ticket Key,Summary,Assignee,Created Date,Last External Comment,Days Since Last Comment\n"
+
+# Check if we have tickets
+TOTAL_TICKETS=$(jq -r '.total' <<< "$STALE_RESPONSE")
+
+if [ "$TOTAL_TICKETS" -gt 0 ]; then
+  # Parse all tickets to check comment history
+  ISSUES=$(jq '.issues' <<< "$STALE_RESPONSE")
+  
+  # Go through each ticket
+  ISSUE_COUNT=$(jq '. | length' <<< "$ISSUES")
+  
+  for (( j=0; j<ISSUE_COUNT; j++ )); do
+    ISSUE=$(jq ".[$j]" <<< "$ISSUES")
+    
+    # Get ticket key and summary
+    TICKET_KEY=$(jq -r '.key' <<< "$ISSUE")
+    TICKET_SUMMARY=$(jq -r '.fields.summary' <<< "$ISSUE" | sed 's/,/ /g' | sed 's/"//g') # Remove commas and quotes for CSV
+    TICKET_ASSIGNEE=$(jq -r '.fields.assignee.displayName' <<< "$ISSUE" | sed 's/,/ /g')
+    TICKET_CREATED=$(jq -r '.fields.created' <<< "$ISSUE")
+    CREATED_DATE=$(date -d "$TICKET_CREATED" "+%Y-%m-%d")
+    
+    # Get comment data if it exists
+    HAS_COMMENTS=$(jq -r 'if .fields.comment then true else false end' <<< "$ISSUE")
+    
+    # Default to stale unless we find a recent external comment
+    IS_STALE=true
+    LAST_EXTERNAL_COMMENT_DATE=""
+    LAST_EXTERNAL_COMMENT_EPOCH=0
+    
+    if [ "$HAS_COMMENTS" = "true" ]; then
+      # Get comments array if it exists
+      COMMENTS=$(jq -r '.fields.comment.comments' <<< "$ISSUE")
+      COMMENTS_COUNT=$(jq '. | length' <<< "$COMMENTS")
       
-      - name: Monitor JIRA Comments for Sateesh
-        id: jira-monitor
-        run: |
-          # Debug: Print version info
-          echo "===== RUNNING JIRA COMMENTS MONITOR ====="
-          echo "Version: March 15, 2025"
+      # Convert to epoch time for comparison
+      for (( k=0; k<COMMENTS_COUNT; k++ )); do
+        COMMENT=$(jq ".[$k]" <<< "$COMMENTS")
+        
+        # Check if this is an external comment (not internal)
+        # Internal comments have ".jsdPublic: false" or missing jsdPublic field
+        # External comments have "jsdPublic: true"
+        IS_INTERNAL=$(jq -r 'if has("jsdPublic") then (if .jsdPublic == false then "true" else "false" end) else "true" end' <<< "$COMMENT")
+        
+        if [ "$IS_INTERNAL" = "false" ]; then
+          # This is an external comment, check its date
+          COMMENT_DATE=$(jq -r '.created' <<< "$COMMENT")
+          # Convert ISO date to epoch time
+          COMMENT_EPOCH=$(date -d "$COMMENT_DATE" +%s)
           
-          # Create URL encoding function
-          urlencode() {
-            local string="${1}"
-            local strlen=${#string}
-            local encoded=""
-            local pos c o
-            
-            for (( pos=0 ; pos<strlen ; pos++ )); do
-              c=${string:$pos:1}
-              case "$c" in
-                [-_.~a-zA-Z0-9] ) o="${c}" ;;
-                * ) printf -v o '%%%02x' "'$c"
-              esac
-              encoded+="${o}"
-            done
-            echo "${encoded}"
-          }
+          # Calculate age in seconds
+          COMMENT_AGE=$((CURRENT_DATE - COMMENT_EPOCH))
           
-          # JIRA Base URL for API and hyperlinks
-          JIRA_BASE_URL="https://quantium.atlassian.net"
-          JIRA_API_URL="${JIRA_BASE_URL}/rest/api/3/search"
-          JIRA_BROWSE_URL="${JIRA_BASE_URL}/issues/?jql="
-          
-          # Jira API credentials
-          AUTH_HEADER="Authorization: Basic ${{ secrets.JIRA_API_TOKEN }}"
-          ACCEPT_HEADER="Accept: application/json"
-          
-          # Target team member
-          TARGET_USER="Sateesh Gulivindala"
-          
-          echo "Checking for tickets with no external comments in last 7 days for: $TARGET_USER"
-          
-          # Time in IST and Sydney
-          IST_TIME=$(date +"%I:%M %p IST")
-          IST_DATE=$(date +"%d-%m-%Y")
-          SYDNEY_TIME=$(TZ='Australia/Sydney' date +"%I:%M %p AEDT")
-          
-          # Base JQL for all active tickets assigned to Sateesh
-          ACTIVE_JQL="assignee = \"$TARGET_USER\" AND status NOT IN (Closed, Resolved, Cancelled)"
-          
-          # Hard-coded URL for all active tickets
-          ACTIVE_LINK="${JIRA_BROWSE_URL}assignee%20%3D%20%22Sateesh%20Gulivindala%22%20AND%20status%20NOT%20IN%20(Closed%2C%20Resolved%2C%20Cancelled)"
-          
-          # Get all active tickets that either:
-          # 1. Have no comments at all, OR
-          # 2. The last external comment was more than 7 days ago
-          
-          # This JQL finds tickets that have NO external comments in the last 7 days
-          NO_RECENT_COMMENTS_JQL="$ACTIVE_JQL AND (
-            NOT EXISTS (
-              SELECT commentJsdPublic 
-              FROM comment 
-              WHERE commentJsdPublic = true AND commentedDate >= -7d
-            )
-          )"
-          
-          # URL for tickets with no external comments in the last 7 days
-          # Hard-coded URL to match JIRA UI format
-          NO_RECENT_COMMENTS_LINK="${JIRA_BROWSE_URL}assignee%20%3D%20%22Sateesh%20Gulivindala%22%20AND%20status%20NOT%20IN%20(Closed%2C%20Resolved%2C%20Cancelled)%20AND%20(NOT%20EXISTS%20(SELECT%20commentJsdPublic%20FROM%20comment%20WHERE%20commentJsdPublic%20%3D%20true%20AND%20commentedDate%20%3E%3D%20-7d))"
-          
-          # Get count of all active tickets
-          SEARCH_URL="${JIRA_API_URL}?jql=$(urlencode "$ACTIVE_JQL")&maxResults=1"
-          
-          echo "Searching with JQL: $ACTIVE_JQL"
-          SEARCH_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "$SEARCH_URL")
-          
-          # Get total results
-          TOTAL_ACTIVE=$(jq -r '.total' <<< "$SEARCH_RESPONSE")
-          echo "Found $TOTAL_ACTIVE active tickets assigned to $TARGET_USER."
-          
-          if [ "$TOTAL_ACTIVE" -eq 0 ]; then
-            echo "No active tickets found for $TARGET_USER."
-            exit 0
+          # If comment is newer than 7 days, ticket is not stale
+          if [ $COMMENT_AGE -lt $SEVEN_DAYS_IN_SECONDS ]; then
+            IS_STALE=false
+            break
           fi
           
-          # Get count of tickets with no external comments in last 7 days
-          NO_RECENT_URL="${JIRA_API_URL}?jql=$(urlencode "$NO_RECENT_COMMENTS_JQL")&maxResults=1"
-          NO_RECENT_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "$NO_RECENT_URL")
-          NO_RECENT_COUNT=$(jq -r '.total' <<< "$NO_RECENT_RESPONSE")
-          
-          echo "Found $NO_RECENT_COUNT tickets with no external comments in the last 7 days."
-          
-          # Create message for Slack
-          MESSAGE="📊 *JIRA Comment Status for Sateesh Gulivindala*\n\n*Status Update* ($SYDNEY_TIME / $IST_TIME)\n"
-          MESSAGE+="• Total active tickets: <${ACTIVE_LINK}|${TOTAL_ACTIVE}>\n"
-          
-          if [ $NO_RECENT_COUNT -gt 0 ]; then
-            # Show the count of tickets with no recent external comments
-            MESSAGE+="• Tickets with no external comments in the last 7 days: <${NO_RECENT_COMMENTS_LINK}|${NO_RECENT_COUNT}>"
-          else
-            MESSAGE+="• *All tickets have external comments in the last 7 days* ✅"
+          # Track the last external comment date
+          if [ $COMMENT_EPOCH -gt $LAST_EXTERNAL_COMMENT_EPOCH ]; then
+            LAST_EXTERNAL_COMMENT_DATE=$COMMENT_DATE
+            LAST_EXTERNAL_COMMENT_EPOCH=$COMMENT_EPOCH
           fi
-          
-          # Send to Slack using a cleaner approach
-          cat > payload.json << EOF
-          {"text": "$(echo "$MESSAGE" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')"}
-          EOF
-          
-          curl -s -X POST \
-               -H "Content-type: application/json" \
-               --data @payload.json \
-               ${{ secrets.SLACK_WEBHOOK_URL }}
+        fi
+      done
+    fi
+    
+    # If the ticket is stale, add it to our list
+    if [ "$IS_STALE" = "true" ]; then
+      # Format last comment date if available
+      COMMENT_DATE_INFO=""
+      FORMATTED_DATE="No external comments"
+      DAYS_SINCE_COMMENT="N/A"
+      
+      if [ -n "$LAST_EXTERNAL_COMMENT_DATE" ]; then
+        # Convert to more readable format
+        FORMATTED_DATE=$(date -d "$LAST_EXTERNAL_COMMENT_DATE" "+%Y-%m-%d")
+        
+        # Calculate days since last comment
+        COMMENT_AGE_DAYS=$(( (CURRENT_DATE - LAST_EXTERNAL_COMMENT_EPOCH) / 86400 ))
+        DAYS_SINCE_COMMENT="$COMMENT_AGE_DAYS days"
+        
+        COMMENT_DATE_INFO=" (Last external comment: $FORMATTED_DATE, $DAYS_SINCE_COMMENT ago)"
+      else
+        COMMENT_DATE_INFO=" (No external comments found)"
+      fi
+      
+      # Add to the stale tickets list for Slack message (limited to 5)
+      STALE_TICKETS=$((STALE_TICKETS + 1))
+      if [ $STALE_TICKETS -le 5 ]; then
+        STALE_TICKETS_LIST="${STALE_TICKETS_LIST}\n• <${JIRA_BASE_URL}/browse/${TICKET_KEY}|${TICKET_KEY}> - ${TICKET_ASSIGNEE}${COMMENT_DATE_INFO}"
+      fi
+      
+      # Add to CSV content regardless of count
+      CSV_CONTENT="${CSV_CONTENT}${TICKET_KEY},\"${TICKET_SUMMARY}\",${TICKET_ASSIGNEE},${CREATED_DATE},${FORMATTED_DATE},${DAYS_SINCE_COMMENT}\n"
+    fi
+  done
+fi
+
+# Create stale tickets message
+if [ $STALE_TICKETS -gt 0 ]; then
+  # Generate CSV file if more than 5 stale tickets
+  if [ $STALE_TICKETS -gt 5 ]; then
+    # Generate a filename with date
+    CSV_FILENAME="stale_tickets_$(date +%Y-%m-%d).csv"
+    echo -e "$CSV_CONTENT" > "$CSV_FILENAME"
+    
+    # Create GitHub gist for the CSV
+    if command -v gh &> /dev/null; then
+      echo "Creating GitHub gist for CSV file..."
+      GIST_URL=$(gh gist create --public "$CSV_FILENAME" | head -n 1)
+      CSV_LINK=" <${GIST_URL}|Download CSV with all ${STALE_TICKETS} tickets>"
+    else
+      CSV_LINK=" (CSV file generated but GitHub CLI not available to create shareable link)"
+    fi
+    
+    STALE_MESSAGE="⚠️ *Stale Tickets Alert* ⚠️\n\n*${STALE_TICKETS} tickets have no external comments in 7+ days.*\n\nShowing first 5 tickets:${STALE_TICKETS_LIST}\n\n${CSV_LINK}\n\nPlease review these tickets and update with appropriate external comments."
+  else
+    STALE_MESSAGE="⚠️ *Stale Tickets Alert* ⚠️\n\n*${STALE_TICKETS} tickets have no external comments in 7+ days:*${STALE_TICKETS_LIST}\n\nPlease review these tickets and update with appropriate external comments."
+  fi
+  
+  echo "Sending stale tickets message to Slack..."
+  ESCAPED_STALE=$(echo "$STALE_MESSAGE" | sed 's/"/\\"/g')
+  curl -s -X POST \
+       -H "Content-type: application/json" \
+       --data "{\"text\":\"$ESCAPED_STALE\"}" \
+       ${{ secrets.SLACK_WEBHOOK_URL }}
+  
+  # If we can't create a gist but have more than 5 tickets, try to upload the CSV as a Slack file
+  if [ $STALE_TICKETS -gt 5 ] && ! command -v gh &> /dev/null; then
+    echo "Uploading CSV file to Slack..."
+    curl -F file=@"$CSV_FILENAME" \
+         -F "initial_comment=Stale tickets CSV export" \
+         -F channels=${{ secrets.SLACK_CHANNEL_ID }} \
+         -H "Authorization: Bearer ${{ secrets.SLACK_BOT_TOKEN }}" \
+         https://slack.com/api/files.upload
+  fi
+else
+  echo "No stale tickets found. Skipping stale ticket alert."
+fi
