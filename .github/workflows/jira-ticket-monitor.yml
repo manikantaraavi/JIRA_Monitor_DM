@@ -53,7 +53,7 @@ jobs:
         run: |
           # Debug: Print version info
           echo "===== RUNNING JIRA MONITOR SCRIPT ====="
-          echo "Version: March 16, 2025 - Sateesh Only Test Version"
+          echo "Version: March 16, 2025 - Fixed Version with Stale Tickets"
           
           # Create URL encoding function
           urlencode() {
@@ -82,12 +82,19 @@ jobs:
           AUTH_HEADER="Authorization: Basic ${{ secrets.JIRA_API_TOKEN }}"
           ACCEPT_HEADER="Accept: application/json"
           
-          # Limited team members list - ONLY SATEESH
+          # Start with 3 team members, gradually expand as testing proves successful
           TEAM_MEMBERS=(
             "Sateesh Gulivindala"
+            "Imran Mohd"
+            "Kuppala Pavan Kumar"
+            # Add more team members here as testing succeeds
+            # "Manikanta Raavi"
+            # "Bommali Naresh"
+            # "Rambabu Yarramsetti"
+            # "Shaik Amair Ahmed"
           )
           
-          echo "Monitoring tickets for ${#TEAM_MEMBERS[@]} team members: ${TEAM_MEMBERS[0]}"
+          echo "Monitoring tickets for ${#TEAM_MEMBERS[@]} team members"
           
           # We've identified customfield_10065 as having the correct priority values
           PRIORITY_FIELD="customfield_10065"
@@ -110,8 +117,14 @@ jobs:
             echo "  ${PRIORITY_SHORT[$i]} = ${PRIORITY_NAMES[$i]}"
           done
           
-          # Build team members clause for JQL - just Sateesh
-          TEAM_MEMBERS_CLAUSE="assignee = \"${TEAM_MEMBERS[0]}\""
+          # Build team members clause for JQL
+          TEAM_MEMBERS_CLAUSE=""
+          for MEMBER in "${TEAM_MEMBERS[@]}"; do
+            if [ -n "$TEAM_MEMBERS_CLAUSE" ]; then
+              TEAM_MEMBERS_CLAUSE="$TEAM_MEMBERS_CLAUSE OR "
+            fi
+            TEAM_MEMBERS_CLAUSE="$TEAM_MEMBERS_CLAUSE assignee = \"$MEMBER\""
+          done
           
           # Variables for tracking tickets
           TOTAL_OPEN_TICKETS=0
@@ -131,7 +144,7 @@ jobs:
           SYDNEY_TIME=$(TZ='Australia/Sydney' date +"%I:%M %p AEDT")
           
           # Build header part
-          HEADER="📊 *JIRA Monitor (Test - Sateesh Only)*"
+          HEADER="📊 *JIRA Monitor*"
           
           # MESSAGE 1: Create the summary message
           # Create team-wide JQL for all tickets
@@ -141,7 +154,7 @@ jobs:
           # Store team member data for workload sections
           MEMBER_DATA=()
           
-          # Process each team member for total counts - Just Sateesh in this test
+          # Process each team member for total counts
           for MEMBER in "${TEAM_MEMBERS[@]}"; do
             echo "🔍 Fetching open tickets for: $MEMBER"
             
@@ -279,7 +292,8 @@ jobs:
                 fi
               done
               
-              # Create JQL queries for each priority - simplified for test version
+              # Create JQL queries for each priority
+              PRIORITY_JQLS=()
               PRIORITY_LINKS=()
               
               # P1 - Critical Priority
@@ -302,7 +316,7 @@ jobs:
               PRIORITY_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND \"Priority (SD)[Dropdown]\" = \"5 - Very Low\""
               PRIORITY_LINKS[4]="${JIRA_BROWSE_URL}$(urlencode "$PRIORITY_JQL")"
               
-              # Format age breakdown - simplified for test
+              # Format age breakdown with hyperlinks
               WEEK_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND created >= -7d"
               WEEK_JQL_ENCODED=$(urlencode "$WEEK_JQL")
               WEEK_URL="${JIRA_API_URL}?jql=${WEEK_JQL_ENCODED}&maxResults=1000"
@@ -373,7 +387,8 @@ jobs:
             MEMBER_DATA+=("$MEMBER_MESSAGE")
           done
           
-          # Create team-wide JQL for priority filters
+          # Create team-wide JQL for each priority level
+          TEAM_PRIORITY_JQLS=()
           TEAM_PRIORITY_LINKS=()
           
           # P1 - Critical Priority
@@ -395,6 +410,10 @@ jobs:
           # P5 - Very Low Priority
           TEAM_PRIORITY_JQL="(${TEAM_MEMBERS_CLAUSE}) AND status NOT IN (Closed, Resolved, Cancelled) AND \"Priority (SD)[Dropdown]\" = \"5 - Very Low\""
           TEAM_PRIORITY_LINKS[4]="${JIRA_BROWSE_URL}$(urlencode "$TEAM_PRIORITY_JQL")"
+          
+          # Create JQL for undefined priorities - using a simpler query structure
+          TEAM_UNDEFINED_JQL="(${TEAM_MEMBERS_CLAUSE}) AND status NOT IN (Closed, Resolved, Cancelled) AND priority is EMPTY"
+          TEAM_UNDEFINED_LINK="${JIRA_BROWSE_URL}$(urlencode "$TEAM_UNDEFINED_JQL")"
           
           # Fix the age legend hyperlinks
           TEAM_WEEK_JQL="(${TEAM_MEMBERS_CLAUSE}) AND status NOT IN (Closed, Resolved, Cancelled) AND created >= -7d"
@@ -454,21 +473,45 @@ jobs:
           # Sleep to ensure messages are sent in order
           sleep 1
           
-          # Prepare workload messages - simplified for test
+          # Prepare workload messages - group team members into smaller batches
           WORKLOAD_MESSAGE="*Team Workload:*"
+          CURRENT_LENGTH=${#WORKLOAD_MESSAGE}
+          MESSAGE_LIMIT=3500  # Conservative limit for Slack messages
           
           for (( i=0; i<${#MEMBER_DATA[@]}; i++ )); do
-            # Add member data directly (no batching needed for just one member)
+            # Calculate length with this member added
+            NEXT_ADDITION="\n${MEMBER_DATA[$i]}"
+            NEXT_LENGTH=$((CURRENT_LENGTH + ${#NEXT_ADDITION}))
+            
+            # If adding this member would make message too large, send current message and start a new one
+            if [ $NEXT_LENGTH -gt $MESSAGE_LIMIT ] && [ $CURRENT_LENGTH -gt 20 ]; then
+              echo "Sending workload message batch to Slack..."
+              ESCAPED_WORKLOAD=$(echo "$WORKLOAD_MESSAGE" | sed 's/"/\\"/g')
+              curl -s -X POST \
+                   -H "Content-type: application/json" \
+                   --data "{\"text\":\"$ESCAPED_WORKLOAD\"}" \
+                   ${{ secrets.SLACK_WEBHOOK_URL }}
+              
+              # Start a new message batch
+              WORKLOAD_MESSAGE="*Team Workload (continued):*"
+              CURRENT_LENGTH=${#WORKLOAD_MESSAGE}
+              sleep 1
+            fi
+            
+            # Add this member to the current message
             WORKLOAD_MESSAGE="$WORKLOAD_MESSAGE\n${MEMBER_DATA[$i]}"
+            CURRENT_LENGTH=${#WORKLOAD_MESSAGE}
           done
           
-          # Send workload data
-          echo "Sending workload message to Slack..."
-          ESCAPED_WORKLOAD=$(echo "$WORKLOAD_MESSAGE" | sed 's/"/\\"/g')
-          curl -s -X POST \
-               -H "Content-type: application/json" \
-               --data "{\"text\":\"$ESCAPED_WORKLOAD\"}" \
-               ${{ secrets.SLACK_WEBHOOK_URL }}
+          # Send any remaining workload data
+          if [ $CURRENT_LENGTH -gt 20 ]; then
+            echo "Sending final workload message to Slack..."
+            ESCAPED_WORKLOAD=$(echo "$WORKLOAD_MESSAGE" | sed 's/"/\\"/g')
+            curl -s -X POST \
+                 -H "Content-type: application/json" \
+                 --data "{\"text\":\"$ESCAPED_WORKLOAD\"}" \
+                 ${{ secrets.SLACK_WEBHOOK_URL }}
+          fi
           
           # Process stale tickets if any found
           if [ $STALE_TICKET_COUNT -gt 0 ]; then
@@ -515,10 +558,10 @@ jobs:
               done
               
               # Add CSV file info to message
-              STALE_MESSAGE="${STALE_MESSAGE}• CSV file with details for all $STALE_TICKET_COUNT stale tickets is attached.\n"
+              STALE_MESSAGE="${STALE_MESSAGE}• CSV file with details for all $STALE_TICKET_COUNT stale tickets is attached below.\n"
               STALE_MESSAGE="${STALE_MESSAGE}• CSV contains: ticket number, last external comment date, subject, and assignee."
               
-              # Send message about CSV file without file upload for this test
+              # Send message about CSV file
               echo "Sending stale tickets message to Slack..."
               ESCAPED_STALE=$(echo "$STALE_MESSAGE" | sed 's/"/\\"/g')
               curl -s -X POST \
@@ -526,9 +569,26 @@ jobs:
                    --data "{\"text\":\"$ESCAPED_STALE\"}" \
                    ${{ secrets.SLACK_WEBHOOK_URL }}
               
-              # Test version doesn't try file upload to reduce complexity
-              echo "TEST MODE: CSV file created but not uploaded to Slack"
-              cat "$CSV_FILE" | head -5
+              # FIXED: Use the correct file upload method for Slack API
+              echo "Uploading CSV file to Slack..."
+              UPLOAD_RESPONSE=$(curl -s -F file=@"$CSV_FILE" \
+                   -F "initial_comment=Stale Tickets Report ($STALE_TICKET_COUNT tickets with no external comments for >7 days)" \
+                   -F channels="${{ secrets.SLACK_CHANNEL_ID }}" \
+                   -F token="${{ secrets.SLACK_BOT_TOKEN }}" \
+                   https://slack.com/api/files.upload)
+              
+              # Check if the upload was successful
+              echo "Slack API response: $UPLOAD_RESPONSE"
+              if [[ $(echo "$UPLOAD_RESPONSE" | jq -r '.ok') == "true" ]]; then
+                echo "File uploaded successfully!"
+              else
+                echo "File upload failed: $(echo "$UPLOAD_RESPONSE" | jq -r '.error')"
+                # Send error message to Slack
+                curl -s -X POST \
+                     -H "Content-type: application/json" \
+                     --data "{\"text\":\"⚠️ *Error:* Failed to upload CSV file: $(echo "$UPLOAD_RESPONSE" | jq -r '.error'). Please check your Slack API token and channel ID.\"}" \
+                     ${{ secrets.SLACK_WEBHOOK_URL }}
+              fi
             fi
           else
             echo "No stale tickets found"
