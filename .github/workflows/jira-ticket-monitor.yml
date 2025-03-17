@@ -540,4 +540,15 @@ jobs:
             
             # Create priority-specific JQL across team members
             PRIORITY_JQL="assignee in (\"${MEMBERS[0]}\""
-            for ((j=1; j<${#MEMBERS[@]}
+            for ((j=1; j<${#MEMBERS[@]}; j++)); do
+              PRIORITY_JQL="${PRIORITY_JQL}, \"${MEMBERS[$j]}\""
+            done
+            PRIORITY_JQL="${PRIORITY_JQL}) AND status NOT IN (Closed, Resolved, Cancelled) AND \"$PRIORITY_FIELD\".value = \"${PRIORITY_NAMES[$i]}\""
+            PRIORITY_JQL_ENCODED=$(urlencode "$PRIORITY_JQL")
+            PRIORITY_LINK="${JIRA_BROWSE_URL}${PRIORITY_JQL_ENCODED}"
+            
+            if [ ${PRIORITY_COUNTS[$i]} -gt 0 ]; then
+              PRIORITY_SUMMARY="${PRIORITY_SUMMARY}<${PRIORITY_LINK}|${PRIORITY_SHORT[$i]}: ${PRIORITY_COUNTS[$i]}>"
+            else
+              PRIORITY_SUMMARY="${PRIORITY_SUMMARY}${PRIORITY_SHORT[$i]}: ${PRIORITY_COUNTS[$i]}"
+            fi
