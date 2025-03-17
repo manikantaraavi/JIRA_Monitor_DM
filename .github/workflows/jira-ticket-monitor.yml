@@ -219,6 +219,25 @@ jobs:
               
               # Process each ticket to check for recent external comments
               for TICKET_KEY in "${MEMBER_TICKET_KEYS[@]}"; do
+                # Get the ticket summary to check for exclusions
+                TICKET_URL="${JIRA_BASE_URL}/rest/api/3/issue/${TICKET_KEY}?fields=summary"
+                TICKET_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "$TICKET_URL")
+                TICKET_SUMMARY=$(echo "$TICKET_RESPONSE" | jq -r '.fields.summary // ""')
+                
+                # Check if this ticket should be excluded based on summary
+                EXCLUDED=false
+                if [[ "$TICKET_SUMMARY" =~ [Pp]hish\ [Mm]ail || 
+                      "$TICKET_SUMMARY" =~ [Oo]ffboarding\ [Rr]equest ||
+                      "$TICKET_SUMMARY" =~ [Oo]nboarding\ [Rr]equest ||
+                      "$TICKET_SUMMARY" =~ [Aa]pplication\ [Pp]atching ]]; then
+                  echo "  $TICKET_KEY - EXCLUDED from stale count due to summary: $TICKET_SUMMARY"
+                  EXCLUDED=true
+                fi
+                
+                # Skip further processing if the ticket is excluded
+                if [ "$EXCLUDED" = true ]; then
+                  continue
+                fi
                 # Fetch comments for this ticket
                 COMMENT_URL="${JIRA_BASE_URL}/rest/api/3/issue/${TICKET_KEY}/comment"
                 COMMENT_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "$COMMENT_URL")
