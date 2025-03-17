@@ -62,7 +62,11 @@ jobs:
           AUTH_HEADER="Authorization: Basic ${{ secrets.JIRA_API_TOKEN }}"
           ACCEPT_HEADER="Accept: application/json"
           
-          # Define team members to monitor with full names
+          # Define team members to monitor with full names and their Slack user IDs
+          declare -A SLACK_IDS
+          SLACK_IDS["Sateesh Gulivindala"]="U017R3REG2D"
+          SLACK_IDS["Rambabu Yarramsetti"]="U017R3REG2D"
+          
           MEMBERS=("Sateesh Gulivindala" "Rambabu Yarramsetti")
           echo "Monitoring tickets for: ${MEMBERS[*]}"
           
@@ -108,6 +112,7 @@ jobs:
           
           # Initialize member messages array
           MEMBER_MESSAGES=()
+          MEMBER_MESSAGES_FOR_DM=()
           
           # Process each team member separately
           for MEMBER in "${MEMBERS[@]}"; do
@@ -389,13 +394,112 @@ jobs:
               else
                 MEMBER_MESSAGE="${MEMBER_MESSAGE}${OLDER_COUNT} (>30d)"
               fi
+              
+              # Create a personalized DM message for the member
+              DM_HEADER="📊 *Your JIRA Ticket Update* ($SYDNEY_TIME / $IST_TIME)\n\n"
+              DM_MESSAGE="${DM_HEADER}Hi ${MEMBER}, here's your current JIRA status:\n\n"
+              DM_MESSAGE="${DM_MESSAGE}• *Your Open Tickets:* <${ALL_LINK}|${TOTAL_COUNT}>"
+              
+              if [ $STALE_COUNT -gt 0 ]; then
+                DM_MESSAGE="${DM_MESSAGE} (including <${STALE_LINK}|${STALE_COUNT} stale tickets> needing response)"
+              else
+                DM_MESSAGE="${DM_MESSAGE} (No stale tickets - great job!)"
+              fi
+              
+              # Add priority breakdown
+              DM_MESSAGE="${DM_MESSAGE}\n• *Priority Breakdown:* "
+              for i in {0..4}; do
+                if [ $i -gt 0 ]; then
+                  DM_MESSAGE="${DM_MESSAGE} | "
+                fi
+                
+                PRIORITY_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND \"$PRIORITY_FIELD\".value = \"${PRIORITY_NAMES[$i]}\""
+                PRIORITY_JQL_ENCODED=$(urlencode "$PRIORITY_JQL")
+                PRIORITY_LINK="${JIRA_BROWSE_URL}${PRIORITY_JQL_ENCODED}"
+                
+                if [ ${MEMBER_PRIORITY_COUNTS[$i]} -gt 0 ]; then
+                  DM_MESSAGE="${DM_MESSAGE}<${PRIORITY_LINK}|${PRIORITY_SHORT[$i]}: ${MEMBER_PRIORITY_COUNTS[$i]}>"
+                else
+                  DM_MESSAGE="${DM_MESSAGE}${PRIORITY_SHORT[$i]}: ${MEMBER_PRIORITY_COUNTS[$i]}"
+                fi
+              done
+              
+              # Add age info
+              DM_MESSAGE="${DM_MESSAGE}\n• *Ticket Age:* "
+              
+              if [ "$WEEK_COUNT" -gt 0 ]; then
+                DM_MESSAGE="${DM_MESSAGE}<${WEEK_LINK}|${WEEK_COUNT}> (≤7d)"
+              else
+                DM_MESSAGE="${DM_MESSAGE}${WEEK_COUNT} (≤7d)"
+              fi
+              
+              DM_MESSAGE="${DM_MESSAGE} | "
+              
+              if [ "$MONTH_COUNT" -gt 0 ]; then
+                DM_MESSAGE="${DM_MESSAGE}<${MONTH_LINK}|${MONTH_COUNT}> (8-30d)"
+              else
+                DM_MESSAGE="${DM_MESSAGE}${MONTH_COUNT} (8-30d)"
+              fi
+              
+              DM_MESSAGE="${DM_MESSAGE} | "
+              
+              if [ "$OLDER_COUNT" -gt 0 ]; then
+                DM_MESSAGE="${DM_MESSAGE}<${OLDER_LINK}|${OLDER_COUNT}> (>30d)"
+              else
+                DM_MESSAGE="${DM_MESSAGE}${OLDER_COUNT} (>30d)"
+              fi
+              
+              # Add information about specific stale tickets if any
+              if [ $STALE_COUNT -gt 0 ]; then
+                DM_MESSAGE="${DM_MESSAGE}\n\n🔔 *Tickets Needing Attention:* These tickets have no external comments in the last 7 days:\n"
+                
+                # Get the stale tickets array based on member name
+                TICKET_ARRAY=()
+                if [[ "$MEMBER" == "Sateesh Gulivindala" ]]; then
+                  TICKET_ARRAY=("${STALE_TICKETS_SATEESH[@]}")
+                elif [[ "$MEMBER" == "Rambabu Yarramsetti" ]]; then
+                  TICKET_ARRAY=("${STALE_TICKETS_RAMBABU[@]}")
+                fi
+                
+                # List up to 5 stale tickets with direct links
+                MAX_TICKETS_TO_LIST=5
+                TICKETS_LISTED=0
+                
+                for TICKET in "${TICKET_ARRAY[@]}"; do
+                  if [ $TICKETS_LISTED -lt $MAX_TICKETS_TO_LIST ]; then
+                    TICKET_DIRECT_LINK="${JIRA_BASE_URL}/browse/${TICKET}"
+                    
+                    # Get ticket summary
+                    TICKET_URL="${JIRA_BASE_URL}/rest/api/3/issue/${TICKET}?fields=summary"
+                    TICKET_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "$TICKET_URL")
+                    TICKET_SUMMARY=$(echo "$TICKET_RESPONSE" | jq -r '.fields.summary // "No summary available"')
+                    
+                    # Add to DM message
+                    DM_MESSAGE="${DM_MESSAGE}• <${TICKET_DIRECT_LINK}|${TICKET}> - ${TICKET_SUMMARY}\n"
+                    TICKETS_LISTED=$((TICKETS_LISTED + 1))
+                  else
+                    break
+                  fi
+                done
+                
+                # If there are more tickets, add a note
+                REMAINING_TICKETS=$((STALE_COUNT - TICKETS_LISTED))
+                if [ $REMAINING_TICKETS -gt 0 ]; then
+                  DM_MESSAGE="${DM_MESSAGE}• <${STALE_LINK}|${REMAINING_TICKETS} more stale tickets...>"
+                fi
+              fi
             else
               # No tickets for this member
               MEMBER_MESSAGE="• *${MEMBER}:* 0 | 0 stale"
+              DM_MESSAGE="📊 *Your JIRA Ticket Update* ($SYDNEY_TIME / $IST_TIME)\n\nHi ${MEMBER}, you currently have no open tickets assigned to you in JIRA."
             fi
             
-            # Add this member's message to the array
+            # Add this member's message to the arrays
             MEMBER_MESSAGES+=("$MEMBER_MESSAGE")
+            MEMBER_MESSAGES_FOR_DM+=("$DM_MESSAGE")
+            
+            # Get the Slack ID for this member
+            SLACK_ID="${SLACK_IDS[$MEMBER]}"
           done
           
           # Fix the age legend hyperlinks
@@ -436,100 +540,4 @@ jobs:
             
             # Create priority-specific JQL across team members
             PRIORITY_JQL="assignee in (\"${MEMBERS[0]}\""
-            for ((j=1; j<${#MEMBERS[@]}; j++)); do
-              PRIORITY_JQL="${PRIORITY_JQL}, \"${MEMBERS[$j]}\""
-            done
-            PRIORITY_JQL="${PRIORITY_JQL}) AND status NOT IN (Closed, Resolved, Cancelled) AND \"$PRIORITY_FIELD\".value = \"${PRIORITY_NAMES[$i]}\""
-            PRIORITY_JQL_ENCODED=$(urlencode "$PRIORITY_JQL")
-            PRIORITY_LINK="${JIRA_BROWSE_URL}${PRIORITY_JQL_ENCODED}"
-            
-            if [ ${PRIORITY_COUNTS[$i]} -gt 0 ]; then
-              PRIORITY_SUMMARY="${PRIORITY_SUMMARY}<${PRIORITY_LINK}|${PRIORITY_SHORT[$i]}: ${PRIORITY_COUNTS[$i]}>"
-            else
-              PRIORITY_SUMMARY="${PRIORITY_SUMMARY}${PRIORITY_SHORT[$i]}: ${PRIORITY_COUNTS[$i]}"
-            fi
-          done
-          
-          SUMMARY_MESSAGE="$SUMMARY_MESSAGE$PRIORITY_SUMMARY"
-          
-          # Create age legend
-          AGE_LEGEND="📊 *Legend:* <${TEAM_WEEK_LINK}|≤7 days> | <${TEAM_MONTH_LINK}|8-30 days> | <${TEAM_OLDER_LINK}|30+ days>"
-          
-          # Create one group for legend and notes
-          LEGEND_GROUP="$AGE_LEGEND"
-          
-          # Add note about undefined priorities to the same group
-          if [ ${UNDEFINED_PRIORITY_COUNT} -gt 0 ]; then
-            LEGEND_GROUP="$LEGEND_GROUP\n\n⚠️ *Note:* Undefined priorities (${UNDEFINED_PRIORITY_COUNT}) are counted under P3."
-          fi
-          
-          # Add the grouped legend to summary message
-          SUMMARY_MESSAGE="$SUMMARY_MESSAGE\n\n$LEGEND_GROUP"
-          
-          echo "Sending summary message to Slack..."
-          
-          # Send the summary message first
-          ESCAPED_SUMMARY=$(echo "$SUMMARY_MESSAGE" | sed 's/"/\\"/g')
-          curl -s -X POST \
-            -H "Content-type: application/json" \
-            --data "{\"text\":\"$ESCAPED_SUMMARY\"}" \
-            ${{ secrets.SLACK_WEBHOOK_URL }}
-          
-          # Sleep to ensure messages are sent in order
-          sleep 1
-          
-          # Send individual member messages
-          for MEMBER_MESSAGE in "${MEMBER_MESSAGES[@]}"; do
-            echo "Sending workload message to Slack..."
-            ESCAPED_WORKLOAD=$(echo "$MEMBER_MESSAGE" | sed 's/"/\\"/g')
-            curl -s -X POST \
-              -H "Content-type: application/json" \
-              --data "{\"text\":\"$ESCAPED_WORKLOAD\"}" \
-              ${{ secrets.SLACK_WEBHOOK_URL }}
-            
-            sleep 1
-          done
-          
-          # Calculate total stale tickets by combining both arrays
-          SATEESH_STALE_COUNT=${#STALE_TICKETS_SATEESH[@]}
-          RAMBABU_STALE_COUNT=${#STALE_TICKETS_RAMBABU[@]}
-          TOTAL_STALE_COUNT=$((SATEESH_STALE_COUNT + RAMBABU_STALE_COUNT))
-          
-          # Combine all stale tickets into one array
-          ALL_STALE_TICKETS=()
-          
-          # Add Sateesh's tickets
-          for TICKET in "${STALE_TICKETS_SATEESH[@]}"; do
-            ALL_STALE_TICKETS+=("$TICKET")
-          done
-          
-          # Add Rambabu's tickets
-          for TICKET in "${STALE_TICKETS_RAMBABU[@]}"; do
-            ALL_STALE_TICKETS+=("$TICKET")
-          done
-          
-          # Create a summary stale ticket message
-          if [ $TOTAL_STALE_COUNT -gt 0 ]; then
-            # Create a CSV of all stale ticket numbers
-            ALL_STALE_CSV=$(IFS=,; echo "${ALL_STALE_TICKETS[*]}")
-            
-            # Create the JQL query with issueKey
-            ALL_STALE_JQL="issueKey in (${ALL_STALE_CSV}) ORDER BY created DESC"
-            ALL_STALE_JQL_ENCODED=$(urlencode "$ALL_STALE_JQL")
-            ALL_STALE_LINK="${JIRA_BROWSE_URL}${ALL_STALE_JQL_ENCODED}"
-            
-            # Create one-line message
-            STALE_SUMMARY="*All Tickets With No Recent External Comments (>7 days):* <${ALL_STALE_LINK}|${TOTAL_STALE_COUNT} tickets>"
-          else
-            STALE_SUMMARY="*All Tickets With No Recent External Comments (>7 days):* 0 tickets"
-          fi
-          
-          # Send to Slack
-          echo "Sending stale summary to Slack..."
-          ESCAPED_STALE=$(echo "$STALE_SUMMARY" | sed 's/"/\\"/g')
-          curl -s -X POST \
-            -H "Content-type: application/json" \
-            --data "{\"text\":\"$ESCAPED_STALE\"}" \
-            ${{ secrets.SLACK_WEBHOOK_URL }}
-          
-          echo "=== JIRA MONITOR COMPLETED SUCCESSFULLY ==="
+            for ((j=1; j<${#MEMBERS[@]}
