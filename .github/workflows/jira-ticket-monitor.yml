@@ -62,9 +62,9 @@ jobs:
           AUTH_HEADER="Authorization: Basic ${{ secrets.JIRA_API_TOKEN }}"
           ACCEPT_HEADER="Accept: application/json"
           
-          # Only Sateesh Gulivindala for this test
-          MEMBER="Sateesh Gulivindala"
-          echo "Monitoring tickets for: $MEMBER"
+          # Define team members to monitor with full names
+          MEMBERS=("Sateesh Gulivindala" "Rambabu Yarramsetti")
+          echo "Monitoring tickets for: ${MEMBERS[*]}"
           
           # We've identified customfield_10065 as having the correct priority values
           PRIORITY_FIELD="customfield_10065"
@@ -85,173 +85,320 @@ jobs:
           done
           UNDEFINED_PRIORITY_COUNT=0
           
+          # Create simple arrays for each member's stale tickets
+          # (Using fixed arrays instead of associative arrays to avoid Bash limitations)
+          STALE_TICKETS_SATEESH=()
+          STALE_TICKETS_RAMBABU=()
+          
           # Time in IST and Sydney
           IST_TIME=$(date +"%I:%M %p IST")
           IST_DATE=$(date +"%d-%m-%Y")
           SYDNEY_TIME=$(TZ='Australia/Sydney' date +"%I:%M %p AEDT")
           
           # Build header part
-          HEADER="📊 *JIRA Monitor (Sateesh Only)*"
+          HEADER="📊 *JIRA Monitor Report*"
           
           # Create team-wide JQL for all tickets
-          ALL_TEAM_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled)"
-          ALL_TEAM_LINK="${JIRA_BROWSE_URL}$(urlencode "$ALL_TEAM_JQL")"
-          
-          # First query: All open tickets using the standard format
-          ALL_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled)"
-          ALL_JQL_ENCODED=$(urlencode "$ALL_JQL")
-          ALL_URL="${JIRA_API_URL}?jql=${ALL_JQL_ENCODED}&maxResults=1000&fields=${PRIORITY_FIELD},summary,created,updated"
-          ALL_LINK="${JIRA_BROWSE_URL}${ALL_JQL_ENCODED}"
-          
-          # Fetch all tickets with the priority field
-          echo "Fetching tickets for $MEMBER..."
-          ALL_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "$ALL_URL")
-          
-          # Check for API errors
-          if echo "$ALL_RESPONSE" | jq -e '.errorMessages' > /dev/null; then
-            API_ERROR=$(echo "$ALL_RESPONSE" | jq -r '.errorMessages[0]')
-            echo "ERROR: JIRA API returned an error: $API_ERROR"
-            exit 1
-          fi
-          
-          # Extract total count
-          TOTAL_COUNT=$(jq -r '.total' <<< "$ALL_RESPONSE")
-          TOTAL_OPEN_TICKETS=$TOTAL_COUNT
-          echo "Found $TOTAL_COUNT total tickets"
-          
-          # Initialize counts
-          MEMBER_PRIORITY_COUNTS=()
-          for i in {0..4}; do
-            MEMBER_PRIORITY_COUNTS[$i]=0
+          TEAM_JQL="assignee in (\"${MEMBERS[0]}\""
+          for ((i=1; i<${#MEMBERS[@]}; i++)); do
+            TEAM_JQL="${TEAM_JQL}, \"${MEMBERS[$i]}\""
           done
-          MEMBER_UNDEFINED_COUNT=0
+          TEAM_JQL="${TEAM_JQL}) AND status NOT IN (Closed, Resolved, Cancelled)"
+          TEAM_LINK="${JIRA_BROWSE_URL}$(urlencode "$TEAM_JQL")"
           
-          if [ "$TOTAL_COUNT" -gt 0 ]; then
-            # Parse all tickets to count priorities
-            ISSUES=$(jq '.issues' <<< "$ALL_RESPONSE")
+          # Initialize member messages array
+          MEMBER_MESSAGES=()
+          
+          # Process each team member separately
+          for MEMBER in "${MEMBERS[@]}"; do
+            echo "Processing tickets for: $MEMBER"
             
-            # Go through each ticket and examine its priority value
-            ISSUE_COUNT=$(jq '. | length' <<< "$ISSUES")
+            # First query: All open tickets for this member
+            ALL_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled)"
+            ALL_JQL_ENCODED=$(urlencode "$ALL_JQL")
+            ALL_URL="${JIRA_API_URL}?jql=${ALL_JQL_ENCODED}&maxResults=1000&fields=${PRIORITY_FIELD},summary,created,updated"
+            ALL_LINK="${JIRA_BROWSE_URL}${ALL_JQL_ENCODED}"
             
-            for (( j=0; j<ISSUE_COUNT; j++ )); do
-              ISSUE=$(jq ".[$j]" <<< "$ISSUES")
-              TICKET_KEY=$(jq -r '.key' <<< "$ISSUE")
-              
-              # Get the priority value from the nested JSON directly
-              PRIORITY_VALUE=$(jq -r ".fields.\"$PRIORITY_FIELD\".value // \"Unknown\"" <<< "$ISSUE")
-              
-              # Debug the priority value to help diagnose issues
-              echo "  Ticket: $TICKET_KEY | Priority Value: '$PRIORITY_VALUE'"
-              
-              # Count based on the exact priority value pattern
-              if [[ "$PRIORITY_VALUE" == "1 - Critical" ]]; then
-                MEMBER_PRIORITY_COUNTS[0]=$((MEMBER_PRIORITY_COUNTS[0] + 1))
-                PRIORITY_COUNTS[0]=$((PRIORITY_COUNTS[0] + 1))
-              elif [[ "$PRIORITY_VALUE" == "2 - High" ]]; then
-                MEMBER_PRIORITY_COUNTS[1]=$((MEMBER_PRIORITY_COUNTS[1] + 1))
-                PRIORITY_COUNTS[1]=$((PRIORITY_COUNTS[1] + 1))
-              elif [[ "$PRIORITY_VALUE" == "3 - Medium" ]]; then
-                MEMBER_PRIORITY_COUNTS[2]=$((MEMBER_PRIORITY_COUNTS[2] + 1))
-                PRIORITY_COUNTS[2]=$((PRIORITY_COUNTS[2] + 1))
-              elif [[ "$PRIORITY_VALUE" == "4 - Low" ]]; then
-                MEMBER_PRIORITY_COUNTS[3]=$((MEMBER_PRIORITY_COUNTS[3] + 1))
-                PRIORITY_COUNTS[3]=$((PRIORITY_COUNTS[3] + 1))
-              elif [[ "$PRIORITY_VALUE" == "5 - Very Low" ]]; then
-                MEMBER_PRIORITY_COUNTS[4]=$((MEMBER_PRIORITY_COUNTS[4] + 1))
-                PRIORITY_COUNTS[4]=$((PRIORITY_COUNTS[4] + 1))
-              else
-                # Default to P3 if unknown, but also track undefined separately
-                MEMBER_PRIORITY_COUNTS[2]=$((MEMBER_PRIORITY_COUNTS[2] + 1))
-                PRIORITY_COUNTS[2]=$((PRIORITY_COUNTS[2] + 1))
-                
-                # Increment undefined counters
-                MEMBER_UNDEFINED_COUNT=$((MEMBER_UNDEFINED_COUNT + 1))
-                UNDEFINED_PRIORITY_COUNT=$((UNDEFINED_PRIORITY_COUNT + 1))
-                
-                echo "  NOTE: Ticket with undefined priority counted as P3: $TICKET_KEY"
-              fi
-            done
+            # Fetch all tickets with the priority field for this member
+            echo "Fetching tickets for $MEMBER..."
+            ALL_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "$ALL_URL")
             
-            # Format age breakdown - Query for each age category
-            WEEK_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND created >= -7d"
-            WEEK_JQL_ENCODED=$(urlencode "$WEEK_JQL")
-            WEEK_LINK="${JIRA_BROWSE_URL}${WEEK_JQL_ENCODED}"
-            WEEK_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "${JIRA_API_URL}?jql=${WEEK_JQL_ENCODED}&maxResults=0")
-            WEEK_COUNT=$(jq -r '.total' <<< "$WEEK_RESPONSE")
+            # Check for API errors
+            if echo "$ALL_RESPONSE" | jq -e '.errorMessages' > /dev/null; then
+              API_ERROR=$(echo "$ALL_RESPONSE" | jq -r '.errorMessages[0]')
+              echo "ERROR: JIRA API returned an error for $MEMBER: $API_ERROR"
+              continue
+            fi
             
-            MONTH_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND created < -7d AND created >= -30d"
-            MONTH_JQL_ENCODED=$(urlencode "$MONTH_JQL")
-            MONTH_LINK="${JIRA_BROWSE_URL}${MONTH_JQL_ENCODED}"
-            MONTH_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "${JIRA_API_URL}?jql=${MONTH_JQL_ENCODED}&maxResults=0")
-            MONTH_COUNT=$(jq -r '.total' <<< "$MONTH_RESPONSE")
+            # Extract total count
+            TOTAL_COUNT=$(jq -r '.total' <<< "$ALL_RESPONSE")
+            TOTAL_OPEN_TICKETS=$((TOTAL_OPEN_TICKETS + TOTAL_COUNT))
+            echo "Found $TOTAL_COUNT total tickets for $MEMBER"
             
-            # Fix the older query format by adding proper quotes
-            OLDER_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND created < \"-30d\""
-            OLDER_JQL_ENCODED=$(urlencode "$OLDER_JQL")
-            OLDER_LINK="${JIRA_BROWSE_URL}${OLDER_JQL_ENCODED}"
-            OLDER_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "${JIRA_API_URL}?jql=${OLDER_JQL_ENCODED}&maxResults=0")
-            OLDER_COUNT=$(jq -r '.total' <<< "$OLDER_RESPONSE")
-            
-            # Format message for Sateesh
-            MEMBER_MESSAGE="• *${MEMBER}:* <${ALL_LINK}|${TOTAL_COUNT}>"
-            
-            # Create separate priority JQL for each priority
-            MEMBER_MESSAGE="${MEMBER_MESSAGE}\n  ↳ Priority: "
-            
+            # Initialize counts for this member
+            MEMBER_PRIORITY_COUNTS=()
             for i in {0..4}; do
-              if [ $i -gt 0 ]; then
-                MEMBER_MESSAGE="${MEMBER_MESSAGE} | "
-              fi
-              
-              # Create priority-specific JQL
-              PRIORITY_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND \"$PRIORITY_FIELD\".value = \"${PRIORITY_NAMES[$i]}\""
-              PRIORITY_JQL_ENCODED=$(urlencode "$PRIORITY_JQL")
-              PRIORITY_LINK="${JIRA_BROWSE_URL}${PRIORITY_JQL_ENCODED}"
-              
-              if [ ${MEMBER_PRIORITY_COUNTS[$i]} -gt 0 ]; then
-                MEMBER_MESSAGE="${MEMBER_MESSAGE}<${PRIORITY_LINK}|${PRIORITY_SHORT[$i]}: ${MEMBER_PRIORITY_COUNTS[$i]}>"
-              else
-                MEMBER_MESSAGE="${MEMBER_MESSAGE}${PRIORITY_SHORT[$i]}: ${MEMBER_PRIORITY_COUNTS[$i]}"
-              fi
+              MEMBER_PRIORITY_COUNTS[$i]=0
             done
+            MEMBER_UNDEFINED_COUNT=0
             
-            # Add age breakdown to the message
-            MEMBER_MESSAGE="${MEMBER_MESSAGE}\n  ↳ Age: "
+            # Get all ticket keys for this member for stale check later
+            MEMBER_TICKET_KEYS=($(echo "$ALL_RESPONSE" | jq -r '.issues[].key'))
             
-            if [ "$WEEK_COUNT" -gt 0 ]; then
-              MEMBER_MESSAGE="${MEMBER_MESSAGE}<${WEEK_LINK}|${WEEK_COUNT}> (≤7d)"
+            if [ "$TOTAL_COUNT" -gt 0 ]; then
+              # Parse all tickets to count priorities
+              ISSUES=$(jq '.issues' <<< "$ALL_RESPONSE")
+              
+              # Go through each ticket and examine its priority value
+              ISSUE_COUNT=$(jq '. | length' <<< "$ISSUES")
+              
+              for (( j=0; j<ISSUE_COUNT; j++ )); do
+                ISSUE=$(jq ".[$j]" <<< "$ISSUES")
+                TICKET_KEY=$(jq -r '.key' <<< "$ISSUE")
+                
+                # Get the priority value from the nested JSON directly
+                PRIORITY_VALUE=$(jq -r ".fields.\"$PRIORITY_FIELD\".value // \"Unknown\"" <<< "$ISSUE")
+                
+                # Debug the priority value to help diagnose issues
+                echo "  Ticket: $TICKET_KEY | Priority Value: '$PRIORITY_VALUE'"
+                
+                # Count based on the exact priority value pattern
+                if [[ "$PRIORITY_VALUE" == "1 - Critical" ]]; then
+                  MEMBER_PRIORITY_COUNTS[0]=$((MEMBER_PRIORITY_COUNTS[0] + 1))
+                  PRIORITY_COUNTS[0]=$((PRIORITY_COUNTS[0] + 1))
+                elif [[ "$PRIORITY_VALUE" == "2 - High" ]]; then
+                  MEMBER_PRIORITY_COUNTS[1]=$((MEMBER_PRIORITY_COUNTS[1] + 1))
+                  PRIORITY_COUNTS[1]=$((PRIORITY_COUNTS[1] + 1))
+                elif [[ "$PRIORITY_VALUE" == "3 - Medium" ]]; then
+                  MEMBER_PRIORITY_COUNTS[2]=$((MEMBER_PRIORITY_COUNTS[2] + 1))
+                  PRIORITY_COUNTS[2]=$((PRIORITY_COUNTS[2] + 1))
+                elif [[ "$PRIORITY_VALUE" == "4 - Low" ]]; then
+                  MEMBER_PRIORITY_COUNTS[3]=$((MEMBER_PRIORITY_COUNTS[3] + 1))
+                  PRIORITY_COUNTS[3]=$((PRIORITY_COUNTS[3] + 1))
+                elif [[ "$PRIORITY_VALUE" == "5 - Very Low" ]]; then
+                  MEMBER_PRIORITY_COUNTS[4]=$((MEMBER_PRIORITY_COUNTS[4] + 1))
+                  PRIORITY_COUNTS[4]=$((PRIORITY_COUNTS[4] + 1))
+                else
+                  # Default to P3 if unknown, but also track undefined separately
+                  MEMBER_PRIORITY_COUNTS[2]=$((MEMBER_PRIORITY_COUNTS[2] + 1))
+                  PRIORITY_COUNTS[2]=$((PRIORITY_COUNTS[2] + 1))
+                  
+                  # Increment undefined counters
+                  MEMBER_UNDEFINED_COUNT=$((MEMBER_UNDEFINED_COUNT + 1))
+                  UNDEFINED_PRIORITY_COUNT=$((UNDEFINED_PRIORITY_COUNT + 1))
+                  
+                  echo "  NOTE: Ticket with undefined priority counted as P3: $TICKET_KEY"
+                fi
+              done
+              
+              # Format age breakdown - Query for each age category
+              WEEK_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND created >= -7d"
+              WEEK_JQL_ENCODED=$(urlencode "$WEEK_JQL")
+              WEEK_LINK="${JIRA_BROWSE_URL}${WEEK_JQL_ENCODED}"
+              WEEK_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "${JIRA_API_URL}?jql=${WEEK_JQL_ENCODED}&maxResults=0")
+              WEEK_COUNT=$(jq -r '.total' <<< "$WEEK_RESPONSE")
+              
+              MONTH_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND created < -7d AND created >= -30d"
+              MONTH_JQL_ENCODED=$(urlencode "$MONTH_JQL")
+              MONTH_LINK="${JIRA_BROWSE_URL}${MONTH_JQL_ENCODED}"
+              MONTH_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "${JIRA_API_URL}?jql=${MONTH_JQL_ENCODED}&maxResults=0")
+              MONTH_COUNT=$(jq -r '.total' <<< "$MONTH_RESPONSE")
+              
+              # Fix the older query format by adding proper quotes
+              OLDER_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND created < \"-30d\""
+              OLDER_JQL_ENCODED=$(urlencode "$OLDER_JQL")
+              OLDER_LINK="${JIRA_BROWSE_URL}${OLDER_JQL_ENCODED}"
+              OLDER_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "${JIRA_API_URL}?jql=${OLDER_JQL_ENCODED}&maxResults=0")
+              OLDER_COUNT=$(jq -r '.total' <<< "$OLDER_RESPONSE")
+              
+              # Check for stale tickets (No recent external comments)
+              echo "Looking for tickets with no recent external comments for $MEMBER..."
+              
+              # Calculate date 7 days ago for comparison
+              SEVEN_DAYS_AGO=$(date -d "7 days ago" +%s)
+              
+              # Process each ticket to check for recent external comments
+              for TICKET_KEY in "${MEMBER_TICKET_KEYS[@]}"; do
+                # Fetch comments for this ticket
+                COMMENT_URL="${JIRA_BASE_URL}/rest/api/3/issue/${TICKET_KEY}/comment"
+                COMMENT_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "$COMMENT_URL")
+                
+                # Initialize variables
+                HAS_RECENT_EXTERNAL_COMMENT=false
+                MOST_RECENT_EXTERNAL_DATE=""
+                
+                # Process comments if they exist
+                if [[ $(echo "$COMMENT_RESPONSE" | jq 'has("comments")') == "true" ]]; then
+                  COMMENTS=$(echo "$COMMENT_RESPONSE" | jq '.comments')
+                  COMMENT_COUNT=$(echo "$COMMENTS" | jq '. | length')
+                  
+                  if [ "$COMMENT_COUNT" -gt 0 ]; then
+                    # Loop through all comments to find external ones and track most recent
+                    for (( k=0; k<COMMENT_COUNT; k++ )); do
+                      COMMENT=$(echo "$COMMENTS" | jq ".[$k]")
+                      
+                      if [[ $(echo "$COMMENT" | jq 'has("jsdPublic")') == "true" ]]; then
+                        IS_PUBLIC=$(echo "$COMMENT" | jq -r '.jsdPublic')
+                        if [[ "$IS_PUBLIC" == "true" ]]; then
+                          COMMENT_DATE=$(echo "$COMMENT" | jq -r '.created')
+                          
+                          # Track the most recent external comment date
+                          if [[ -z "$MOST_RECENT_EXTERNAL_DATE" || "$COMMENT_DATE" > "$MOST_RECENT_EXTERNAL_DATE" ]]; then
+                            MOST_RECENT_EXTERNAL_DATE="$COMMENT_DATE"
+                          fi
+                        fi
+                      fi
+                    done
+                    
+                    # Check if there was any external comment
+                    if [ -n "$MOST_RECENT_EXTERNAL_DATE" ]; then
+                      # Convert to timestamp for comparison
+                      RECENT_TIMESTAMP=$(date -d "$MOST_RECENT_EXTERNAL_DATE" +%s)
+                      
+                      # Check if the most recent external comment is within the last 7 days
+                      if [ "$RECENT_TIMESTAMP" -ge "$SEVEN_DAYS_AGO" ]; then
+                        HAS_RECENT_EXTERNAL_COMMENT=true
+                      else
+                        echo "  $TICKET_KEY - Has external comments but all are older than 7 days"
+                        # Add to the appropriate member's stale ticket array using simple name-based if statements
+                        if [[ "$MEMBER" == "Sateesh Gulivindala" ]]; then
+                          STALE_TICKETS_SATEESH+=("$TICKET_KEY")
+                        elif [[ "$MEMBER" == "Rambabu Yarramsetti" ]]; then
+                          STALE_TICKETS_RAMBABU+=("$TICKET_KEY")
+                        fi
+                      fi
+                    else
+                      echo "  $TICKET_KEY - No external comments found"
+                      # Add to the appropriate member's stale ticket array
+                      if [[ "$MEMBER" == "Sateesh Gulivindala" ]]; then
+                        STALE_TICKETS_SATEESH+=("$TICKET_KEY")
+                      elif [[ "$MEMBER" == "Rambabu Yarramsetti" ]]; then
+                        STALE_TICKETS_RAMBABU+=("$TICKET_KEY")
+                      fi
+                    fi
+                  else
+                    echo "  $TICKET_KEY - No comments at all"
+                    # Add to the appropriate member's stale ticket array
+                    if [[ "$MEMBER" == "Sateesh Gulivindala" ]]; then
+                      STALE_TICKETS_SATEESH+=("$TICKET_KEY")
+                    elif [[ "$MEMBER" == "Rambabu Yarramsetti" ]]; then
+                      STALE_TICKETS_RAMBABU+=("$TICKET_KEY")
+                    fi
+                  fi
+                else
+                  echo "  WARNING: Could not fetch comments for $TICKET_KEY"
+                  # Assume worst case if we can't check, add to stale tickets
+                  if [[ "$MEMBER" == "Sateesh Gulivindala" ]]; then
+                    STALE_TICKETS_SATEESH+=("$TICKET_KEY")
+                  elif [[ "$MEMBER" == "Rambabu Yarramsetti" ]]; then
+                    STALE_TICKETS_RAMBABU+=("$TICKET_KEY")
+                  fi
+                fi
+              done
+              
+              # Get stale ticket count based on member name
+              STALE_COUNT=0
+              STALE_CSV=""
+              if [[ "$MEMBER" == "Sateesh Gulivindala" ]]; then
+                STALE_COUNT=${#STALE_TICKETS_SATEESH[@]}
+                if [ $STALE_COUNT -gt 0 ]; then
+                  STALE_CSV=$(IFS=,; echo "${STALE_TICKETS_SATEESH[*]}")
+                fi
+              elif [[ "$MEMBER" == "Rambabu Yarramsetti" ]]; then
+                STALE_COUNT=${#STALE_TICKETS_RAMBABU[@]}
+                if [ $STALE_COUNT -gt 0 ]; then
+                  STALE_CSV=$(IFS=,; echo "${STALE_TICKETS_RAMBABU[*]}")
+                fi
+              fi
+              
+              # Format member stale ticket information
+              if [ $STALE_COUNT -gt 0 ]; then
+                # Create the JQL query with issueKey
+                STALE_JQL="issueKey in (${STALE_CSV}) ORDER BY created DESC"
+                STALE_JQL_ENCODED=$(urlencode "$STALE_JQL")
+                STALE_LINK="${JIRA_BROWSE_URL}${STALE_JQL_ENCODED}"
+                
+                STALE_INFO=" | <${STALE_LINK}|${STALE_COUNT} stale>"
+              else
+                STALE_INFO=" | 0 stale"
+              fi
+              
+              # Format message for this member, including stale info beside name
+              MEMBER_MESSAGE="• *${MEMBER}:* <${ALL_LINK}|${TOTAL_COUNT}>${STALE_INFO}"
+              
+              # Create separate priority JQL for each priority
+              MEMBER_MESSAGE="${MEMBER_MESSAGE}\n  ↳ Priority: "
+              
+              for i in {0..4}; do
+                if [ $i -gt 0 ]; then
+                  MEMBER_MESSAGE="${MEMBER_MESSAGE} | "
+                fi
+                
+                # Create priority-specific JQL
+                PRIORITY_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND \"$PRIORITY_FIELD\".value = \"${PRIORITY_NAMES[$i]}\""
+                PRIORITY_JQL_ENCODED=$(urlencode "$PRIORITY_JQL")
+                PRIORITY_LINK="${JIRA_BROWSE_URL}${PRIORITY_JQL_ENCODED}"
+                
+                if [ ${MEMBER_PRIORITY_COUNTS[$i]} -gt 0 ]; then
+                  MEMBER_MESSAGE="${MEMBER_MESSAGE}<${PRIORITY_LINK}|${PRIORITY_SHORT[$i]}: ${MEMBER_PRIORITY_COUNTS[$i]}>"
+                else
+                  MEMBER_MESSAGE="${MEMBER_MESSAGE}${PRIORITY_SHORT[$i]}: ${MEMBER_PRIORITY_COUNTS[$i]}"
+                fi
+              done
+              
+              # Add age breakdown to the message
+              MEMBER_MESSAGE="${MEMBER_MESSAGE}\n  ↳ Age: "
+              
+              if [ "$WEEK_COUNT" -gt 0 ]; then
+                MEMBER_MESSAGE="${MEMBER_MESSAGE}<${WEEK_LINK}|${WEEK_COUNT}> (≤7d)"
+              else
+                MEMBER_MESSAGE="${MEMBER_MESSAGE}${WEEK_COUNT} (≤7d)"
+              fi
+              
+              MEMBER_MESSAGE="${MEMBER_MESSAGE} | "
+              
+              if [ "$MONTH_COUNT" -gt 0 ]; then
+                MEMBER_MESSAGE="${MEMBER_MESSAGE}<${MONTH_LINK}|${MONTH_COUNT}> (8-30d)"
+              else
+                MEMBER_MESSAGE="${MEMBER_MESSAGE}${MONTH_COUNT} (8-30d)"
+              fi
+              
+              MEMBER_MESSAGE="${MEMBER_MESSAGE} | "
+              
+              if [ "$OLDER_COUNT" -gt 0 ]; then
+                MEMBER_MESSAGE="${MEMBER_MESSAGE}<${OLDER_LINK}|${OLDER_COUNT}> (>30d)"
+              else
+                MEMBER_MESSAGE="${MEMBER_MESSAGE}${OLDER_COUNT} (>30d)"
+              fi
             else
-              MEMBER_MESSAGE="${MEMBER_MESSAGE}${WEEK_COUNT} (≤7d)"
+              # No tickets for this member
+              MEMBER_MESSAGE="• *${MEMBER}:* 0 | 0 stale"
             fi
             
-            MEMBER_MESSAGE="${MEMBER_MESSAGE} | "
-            
-            if [ "$MONTH_COUNT" -gt 0 ]; then
-              MEMBER_MESSAGE="${MEMBER_MESSAGE}<${MONTH_LINK}|${MONTH_COUNT}> (8-30d)"
-            else
-              MEMBER_MESSAGE="${MEMBER_MESSAGE}${MONTH_COUNT} (8-30d)"
-            fi
-            
-            MEMBER_MESSAGE="${MEMBER_MESSAGE} | "
-            
-            if [ "$OLDER_COUNT" -gt 0 ]; then
-              MEMBER_MESSAGE="${MEMBER_MESSAGE}<${OLDER_LINK}|${OLDER_COUNT}> (>30d)"
-            else
-              MEMBER_MESSAGE="${MEMBER_MESSAGE}${OLDER_COUNT} (>30d)"
-            fi
-          else
-            # No tickets for Sateesh
-            MEMBER_MESSAGE="• *${MEMBER}:* 0"
-          fi
+            # Add this member's message to the array
+            MEMBER_MESSAGES+=("$MEMBER_MESSAGE")
+          done
           
           # Fix the age legend hyperlinks
-          TEAM_WEEK_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND created >= -7d"
+          TEAM_WEEK_JQL="assignee in (\"${MEMBERS[0]}\""
+          for ((i=1; i<${#MEMBERS[@]}; i++)); do
+            TEAM_WEEK_JQL="${TEAM_WEEK_JQL}, \"${MEMBERS[$i]}\""
+          done
+          TEAM_WEEK_JQL="${TEAM_WEEK_JQL}) AND status NOT IN (Closed, Resolved, Cancelled) AND created >= -7d"
           TEAM_WEEK_LINK="${JIRA_BROWSE_URL}$(urlencode "$TEAM_WEEK_JQL")"
           
-          TEAM_MONTH_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND created < -7d AND created >= -30d"
+          TEAM_MONTH_JQL="assignee in (\"${MEMBERS[0]}\""
+          for ((i=1; i<${#MEMBERS[@]}; i++)); do
+            TEAM_MONTH_JQL="${TEAM_MONTH_JQL}, \"${MEMBERS[$i]}\""
+          done
+          TEAM_MONTH_JQL="${TEAM_MONTH_JQL}) AND status NOT IN (Closed, Resolved, Cancelled) AND created < -7d AND created >= -30d"
           TEAM_MONTH_LINK="${JIRA_BROWSE_URL}$(urlencode "$TEAM_MONTH_JQL")"
           
-          TEAM_OLDER_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND created < \"-30d\""
+          TEAM_OLDER_JQL="assignee in (\"${MEMBERS[0]}\""
+          for ((i=1; i<${#MEMBERS[@]}; i++)); do
+            TEAM_OLDER_JQL="${TEAM_OLDER_JQL}, \"${MEMBERS[$i]}\""
+          done
+          TEAM_OLDER_JQL="${TEAM_OLDER_JQL}) AND status NOT IN (Closed, Resolved, Cancelled) AND created < \"-30d\""
           TEAM_OLDER_LINK="${JIRA_BROWSE_URL}$(urlencode "$TEAM_OLDER_JQL")"
           
           # Build the summary message
@@ -259,7 +406,7 @@ jobs:
           
           # Plain text summary with hyperlink for total tickets and time zones
           SUMMARY_MESSAGE="$SUMMARY_MESSAGE\n• *JIRA Status Update* ($SYDNEY_TIME / $IST_TIME)"
-          SUMMARY_MESSAGE="$SUMMARY_MESSAGE\n• *Open Tickets:* <${ALL_TEAM_LINK}|${TOTAL_OPEN_TICKETS}>"
+          SUMMARY_MESSAGE="$SUMMARY_MESSAGE\n• *Open Tickets:* <${TEAM_LINK}|${TOTAL_OPEN_TICKETS}>"
           
           # Add priority breakdown with hyperlinks to specific priority searches
           PRIORITY_SUMMARY="\n• *Priority Breakdown:* "
@@ -268,8 +415,12 @@ jobs:
               PRIORITY_SUMMARY="${PRIORITY_SUMMARY} | "
             fi
             
-            # Create priority-specific JQL
-            PRIORITY_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled) AND \"$PRIORITY_FIELD\".value = \"${PRIORITY_NAMES[$i]}\""
+            # Create priority-specific JQL across team members
+            PRIORITY_JQL="assignee in (\"${MEMBERS[0]}\""
+            for ((j=1; j<${#MEMBERS[@]}; j++)); do
+              PRIORITY_JQL="${PRIORITY_JQL}, \"${MEMBERS[$j]}\""
+            done
+            PRIORITY_JQL="${PRIORITY_JQL}) AND status NOT IN (Closed, Resolved, Cancelled) AND \"$PRIORITY_FIELD\".value = \"${PRIORITY_NAMES[$i]}\""
             PRIORITY_JQL_ENCODED=$(urlencode "$PRIORITY_JQL")
             PRIORITY_LINK="${JIRA_BROWSE_URL}${PRIORITY_JQL_ENCODED}"
             
@@ -308,120 +459,55 @@ jobs:
           # Sleep to ensure messages are sent in order
           sleep 1
           
-          # Send workload message for Sateesh
-          WORKLOAD_MESSAGE="*Workload for ${MEMBER}:*\n${MEMBER_MESSAGE}"
-          
-          echo "Sending workload message to Slack..."
-          ESCAPED_WORKLOAD=$(echo "$WORKLOAD_MESSAGE" | sed 's/"/\\"/g')
-          curl -s -X POST \
-            -H "Content-type: application/json" \
-            --data "{\"text\":\"$ESCAPED_WORKLOAD\"}" \
-            ${{ secrets.SLACK_WEBHOOK_URL }}
-          
-          sleep 1
-          
-          # UPDATED LOGIC: Look for tickets with NO RECENT external comments (either none at all or none in last 7 days)
-          echo "Looking for tickets with no recent external comments..."
-          
-          # Get ALL open tickets - we need to check all of them, not just old ones
-          ALL_TICKETS_JQL="assignee = \"$MEMBER\" AND status NOT IN (Closed, Resolved, Cancelled)"
-          ALL_TICKETS_JQL_ENCODED=$(urlencode "$ALL_TICKETS_JQL")
-          ALL_TICKETS_URL="${JIRA_API_URL}?jql=${ALL_TICKETS_JQL_ENCODED}&maxResults=1000&fields=key"
-          
-          ALL_TICKETS_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "$ALL_TICKETS_URL")
-          ALL_TICKET_KEYS=($(echo "$ALL_TICKETS_RESPONSE" | jq -r '.issues[].key'))
-          ALL_TICKET_COUNT=${#ALL_TICKET_KEYS[@]}
-          
-          echo "Checking $ALL_TICKET_COUNT total tickets for external comments..."
-          
-          # Array to store tickets with no RECENT external comments
-          NO_RECENT_EXTERNAL_COMMENTS=()
-          
-          # Calculate date 7 days ago for comparison
-          SEVEN_DAYS_AGO=$(date -d "7 days ago" +%s)
-          
-          # Process each ticket to check for recent external comments
-          for TICKET_KEY in "${ALL_TICKET_KEYS[@]}"; do
-            # Fetch comments for this ticket
-            COMMENT_URL="${JIRA_BASE_URL}/rest/api/3/issue/${TICKET_KEY}/comment"
-            COMMENT_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "$COMMENT_URL")
+          # Send individual member messages
+          for MEMBER_MESSAGE in "${MEMBER_MESSAGES[@]}"; do
+            echo "Sending workload message to Slack..."
+            ESCAPED_WORKLOAD=$(echo "$MEMBER_MESSAGE" | sed 's/"/\\"/g')
+            curl -s -X POST \
+              -H "Content-type: application/json" \
+              --data "{\"text\":\"$ESCAPED_WORKLOAD\"}" \
+              ${{ secrets.SLACK_WEBHOOK_URL }}
             
-            # Initialize variables
-            HAS_RECENT_EXTERNAL_COMMENT=false
-            MOST_RECENT_EXTERNAL_DATE=""
-            
-            # Process comments if they exist
-            if [[ $(echo "$COMMENT_RESPONSE" | jq 'has("comments")') == "true" ]]; then
-              COMMENTS=$(echo "$COMMENT_RESPONSE" | jq '.comments')
-              COMMENT_COUNT=$(echo "$COMMENTS" | jq '. | length')
-              
-              if [ "$COMMENT_COUNT" -gt 0 ]; then
-                # Loop through all comments to find external ones and track most recent
-                for (( k=0; k<COMMENT_COUNT; k++ )); do
-                  COMMENT=$(echo "$COMMENTS" | jq ".[$k]")
-                  
-                  if [[ $(echo "$COMMENT" | jq 'has("jsdPublic")') == "true" ]]; then
-                    IS_PUBLIC=$(echo "$COMMENT" | jq -r '.jsdPublic')
-                    if [[ "$IS_PUBLIC" == "true" ]]; then
-                      COMMENT_DATE=$(echo "$COMMENT" | jq -r '.created')
-                      
-                      # Track the most recent external comment date
-                      if [[ -z "$MOST_RECENT_EXTERNAL_DATE" || "$COMMENT_DATE" > "$MOST_RECENT_EXTERNAL_DATE" ]]; then
-                        MOST_RECENT_EXTERNAL_DATE="$COMMENT_DATE"
-                      fi
-                    fi
-                  fi
-                done
-                
-                # Check if there was any external comment
-                if [ -n "$MOST_RECENT_EXTERNAL_DATE" ]; then
-                  # Convert to timestamp for comparison
-                  RECENT_TIMESTAMP=$(date -d "$MOST_RECENT_EXTERNAL_DATE" +%s)
-                  
-                  # Check if the most recent external comment is within the last 7 days
-                  if [ "$RECENT_TIMESTAMP" -ge "$SEVEN_DAYS_AGO" ]; then
-                    HAS_RECENT_EXTERNAL_COMMENT=true
-                  else
-                    echo "  $TICKET_KEY - Has external comments but all are older than 7 days"
-                    NO_RECENT_EXTERNAL_COMMENTS+=("$TICKET_KEY")
-                  fi
-                else
-                  echo "  $TICKET_KEY - No external comments found"
-                  NO_RECENT_EXTERNAL_COMMENTS+=("$TICKET_KEY")
-                fi
-              else
-                echo "  $TICKET_KEY - No comments at all"
-                NO_RECENT_EXTERNAL_COMMENTS+=("$TICKET_KEY")
-              fi
-            else
-              echo "  WARNING: Could not fetch comments for $TICKET_KEY"
-              # Assume worst case if we can't check
-              NO_RECENT_EXTERNAL_COMMENTS+=("$TICKET_KEY")
-            fi
+            sleep 1
           done
           
-          # Check if we found any tickets with no recent external comments
-          NO_RECENT_EXTERNAL_COUNT=${#NO_RECENT_EXTERNAL_COMMENTS[@]}
+          # Calculate total stale tickets by combining both arrays
+          SATEESH_STALE_COUNT=${#STALE_TICKETS_SATEESH[@]}
+          RAMBABU_STALE_COUNT=${#STALE_TICKETS_RAMBABU[@]}
+          TOTAL_STALE_COUNT=$((SATEESH_STALE_COUNT + RAMBABU_STALE_COUNT))
           
-          # Create a simple, focused report
-          if [ $NO_RECENT_EXTERNAL_COUNT -gt 0 ]; then
-            # Create a CSV of the ticket numbers
-            NO_RECENT_EXTERNAL_CSV=$(IFS=,; echo "${NO_RECENT_EXTERNAL_COMMENTS[*]}")
+          # Combine all stale tickets into one array
+          ALL_STALE_TICKETS=()
+          
+          # Add Sateesh's tickets
+          for TICKET in "${STALE_TICKETS_SATEESH[@]}"; do
+            ALL_STALE_TICKETS+=("$TICKET")
+          done
+          
+          # Add Rambabu's tickets
+          for TICKET in "${STALE_TICKETS_RAMBABU[@]}"; do
+            ALL_STALE_TICKETS+=("$TICKET")
+          done
+          
+          # Create a summary stale ticket message
+          if [ $TOTAL_STALE_COUNT -gt 0 ]; then
+            # Create a CSV of all stale ticket numbers
+            ALL_STALE_CSV=$(IFS=,; echo "${ALL_STALE_TICKETS[*]}")
             
             # Create the JQL query with issueKey
-            NO_EXT_JQL="issueKey in (${NO_RECENT_EXTERNAL_CSV}) ORDER BY created DESC"
-            NO_EXT_JQL_ENCODED=$(urlencode "$NO_EXT_JQL")
-            NO_EXT_LINK="${JIRA_BROWSE_URL}${NO_EXT_JQL_ENCODED}"
+            ALL_STALE_JQL="issueKey in (${ALL_STALE_CSV}) ORDER BY created DESC"
+            ALL_STALE_JQL_ENCODED=$(urlencode "$ALL_STALE_JQL")
+            ALL_STALE_LINK="${JIRA_BROWSE_URL}${ALL_STALE_JQL_ENCODED}"
             
             # Create one-line message
-            STALE_MESSAGE="*Tickets With No Recent External Comments (>7 days):* <${NO_EXT_LINK}|${NO_RECENT_EXTERNAL_COUNT} tickets>"
+            STALE_SUMMARY="*All Tickets With No Recent External Comments (>7 days):* <${ALL_STALE_LINK}|${TOTAL_STALE_COUNT} tickets>"
           else
-            STALE_MESSAGE="*Tickets With No Recent External Comments (>7 days):* 0 tickets"
+            STALE_SUMMARY="*All Tickets With No Recent External Comments (>7 days):* 0 tickets"
           fi
           
           # Send to Slack
-          echo "Sending report to Slack..."
-          ESCAPED_STALE=$(echo "$STALE_MESSAGE" | sed 's/"/\\"/g')
+          echo "Sending stale summary to Slack..."
+          ESCAPED_STALE=$(echo "$STALE_SUMMARY" | sed 's/"/\\"/g')
           curl -s -X POST \
             -H "Content-type: application/json" \
             --data "{\"text\":\"$ESCAPED_STALE\"}" \
