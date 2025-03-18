@@ -65,9 +65,8 @@ jobs:
           # Define team members to monitor with full names and their Slack user IDs
           declare -A SLACK_IDS
           SLACK_IDS["Sateesh Gulivindala"]="U07Q1MMFM6Z"
-          SLACK_IDS["Rambabu Yarramsetti"]="U07Q1MMFM6Z"
           
-          MEMBERS=("Sateesh Gulivindala" "Rambabu Yarramsetti")
+          MEMBERS=("Sateesh Gulivindala")
           echo "Monitoring tickets for: ${MEMBERS[*]}"
           
           # We've identified customfield_10065 as having the correct priority values
@@ -92,7 +91,6 @@ jobs:
           # Create simple arrays for each member's stale tickets
           # (Using fixed arrays instead of associative arrays to avoid Bash limitations)
           STALE_TICKETS_SATEESH=()
-          STALE_TICKETS_RAMBABU=()
           
           # Time in IST and Sydney
           IST_TIME=$(date +"%I:%M %p IST")
@@ -284,21 +282,13 @@ jobs:
                         HAS_RECENT_EXTERNAL_COMMENT=true
                       else
                         echo "  $TICKET_KEY - Has external comments but all are older than 7 days"
-                        # Add to the appropriate member's stale ticket array using simple name-based if statements
-                        if [[ "$MEMBER" == "Sateesh Gulivindala" ]]; then
-                          STALE_TICKETS_SATEESH+=("$TICKET_KEY")
-                        elif [[ "$MEMBER" == "Rambabu Yarramsetti" ]]; then
-                          STALE_TICKETS_RAMBABU+=("$TICKET_KEY")
-                        fi
+                        # Add to Sateesh's stale ticket array
+                        STALE_TICKETS_SATEESH+=("$TICKET_KEY")
                       fi
                     else
                       echo "  $TICKET_KEY - No external comments found"
-                      # Add to the appropriate member's stale ticket array
-                      if [[ "$MEMBER" == "Sateesh Gulivindala" ]]; then
-                        STALE_TICKETS_SATEESH+=("$TICKET_KEY")
-                      elif [[ "$MEMBER" == "Rambabu Yarramsetti" ]]; then
-                        STALE_TICKETS_RAMBABU+=("$TICKET_KEY")
-                      fi
+                      # Add to Sateesh's stale ticket array
+                      STALE_TICKETS_SATEESH+=("$TICKET_KEY")
                     fi
                   else
                     echo "  $TICKET_KEY - No comments at all"
@@ -312,27 +302,16 @@ jobs:
                 else
                   echo "  WARNING: Could not fetch comments for $TICKET_KEY"
                   # Assume worst case if we can't check, add to stale tickets
-                  if [[ "$MEMBER" == "Sateesh Gulivindala" ]]; then
-                    STALE_TICKETS_SATEESH+=("$TICKET_KEY")
-                  elif [[ "$MEMBER" == "Rambabu Yarramsetti" ]]; then
-                    STALE_TICKETS_RAMBABU+=("$TICKET_KEY")
-                  fi
+                  STALE_TICKETS_SATEESH+=("$TICKET_KEY")
                 fi
               done
               
               # Get stale ticket count based on member name
               STALE_COUNT=0
               STALE_CSV=""
-              if [[ "$MEMBER" == "Sateesh Gulivindala" ]]; then
-                STALE_COUNT=${#STALE_TICKETS_SATEESH[@]}
-                if [ $STALE_COUNT -gt 0 ]; then
-                  STALE_CSV=$(IFS=,; echo "${STALE_TICKETS_SATEESH[*]}")
-                fi
-              elif [[ "$MEMBER" == "Rambabu Yarramsetti" ]]; then
-                STALE_COUNT=${#STALE_TICKETS_RAMBABU[@]}
-                if [ $STALE_COUNT -gt 0 ]; then
-                  STALE_CSV=$(IFS=,; echo "${STALE_TICKETS_RAMBABU[*]}")
-                fi
+              STALE_COUNT=${#STALE_TICKETS_SATEESH[@]}
+              if [ $STALE_COUNT -gt 0 ]; then
+                STALE_CSV=$(IFS=,; echo "${STALE_TICKETS_SATEESH[*]}")
               fi
               
               # Format member stale ticket information
@@ -453,13 +432,8 @@ jobs:
               if [ $STALE_COUNT -gt 0 ]; then
                 DM_MESSAGE="${DM_MESSAGE}\n\n🔔 *Tickets Needing Attention:* These tickets have no external comments in the last 7 days:\n"
                 
-                # Get the stale tickets array based on member name
-                TICKET_ARRAY=()
-                if [[ "$MEMBER" == "Sateesh Gulivindala" ]]; then
-                  TICKET_ARRAY=("${STALE_TICKETS_SATEESH[@]}")
-                elif [[ "$MEMBER" == "Rambabu Yarramsetti" ]]; then
-                  TICKET_ARRAY=("${STALE_TICKETS_RAMBABU[@]}")
-                fi
+                # Get the stale tickets array
+                TICKET_ARRAY=("${STALE_TICKETS_SATEESH[@]}")
                 
                 # List up to 5 stale tickets with direct links
                 MAX_TICKETS_TO_LIST=5
