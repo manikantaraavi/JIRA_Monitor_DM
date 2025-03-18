@@ -62,7 +62,7 @@ jobs:
           AUTH_HEADER="Authorization: Basic ${{ secrets.JIRA_API_TOKEN }}"
           ACCEPT_HEADER="Accept: application/json"
           
-          # Define team members to monitor with full names and their Slack user IDs
+          # Define only Sateesh for monitoring with Slack user ID
           declare -A SLACK_IDS
           SLACK_IDS["Sateesh Gulivindala"]="U07Q1MMFM6Z"
           
@@ -88,8 +88,7 @@ jobs:
           done
           UNDEFINED_PRIORITY_COUNT=0
           
-          # Create simple arrays for each member's stale tickets
-          # (Using fixed arrays instead of associative arrays to avoid Bash limitations)
+          # Create simple array for Sateesh's stale tickets
           STALE_TICKETS_SATEESH=()
           
           # Time in IST and Sydney
@@ -100,19 +99,15 @@ jobs:
           # Build header part
           HEADER="📊 *JIRA Monitor Report*"
           
-          # Create team-wide JQL for all tickets
-          TEAM_JQL="assignee in (\"${MEMBERS[0]}\""
-          for ((i=1; i<${#MEMBERS[@]}; i++)); do
-            TEAM_JQL="${TEAM_JQL}, \"${MEMBERS[$i]}\""
-          done
-          TEAM_JQL="${TEAM_JQL}) AND status NOT IN (Closed, Resolved, Cancelled)"
+          # Create team-wide JQL for all tickets - simplified for single member
+          TEAM_JQL="assignee = \"${MEMBERS[0]}\" AND status NOT IN (Closed, Resolved, Cancelled)"
           TEAM_LINK="${JIRA_BROWSE_URL}$(urlencode "$TEAM_JQL")"
           
           # Initialize member messages array
           MEMBER_MESSAGES=()
           MEMBER_MESSAGES_FOR_DM=()
           
-          # Process each team member separately
+          # Process Sateesh
           for MEMBER in "${MEMBERS[@]}"; do
             echo "Processing tickets for: $MEMBER"
             
@@ -292,12 +287,8 @@ jobs:
                     fi
                   else
                     echo "  $TICKET_KEY - No comments at all"
-                    # Add to the appropriate member's stale ticket array
-                    if [[ "$MEMBER" == "Sateesh Gulivindala" ]]; then
-                      STALE_TICKETS_SATEESH+=("$TICKET_KEY")
-                    elif [[ "$MEMBER" == "Rambabu Yarramsetti" ]]; then
-                      STALE_TICKETS_RAMBABU+=("$TICKET_KEY")
-                    fi
+                    # Add to Sateesh's stale ticket array
+                    STALE_TICKETS_SATEESH+=("$TICKET_KEY")
                   fi
                 else
                   echo "  WARNING: Could not fetch comments for $TICKET_KEY"
@@ -306,10 +297,9 @@ jobs:
                 fi
               done
               
-              # Get stale ticket count based on member name
-              STALE_COUNT=0
-              STALE_CSV=""
+              # Get stale ticket count
               STALE_COUNT=${#STALE_TICKETS_SATEESH[@]}
+              STALE_CSV=""
               if [ $STALE_COUNT -gt 0 ]; then
                 STALE_CSV=$(IFS=,; echo "${STALE_TICKETS_SATEESH[*]}")
               fi
@@ -432,7 +422,7 @@ jobs:
               if [ $STALE_COUNT -gt 0 ]; then
                 DM_MESSAGE="${DM_MESSAGE}\n\n🔔 *Tickets Needing Attention:* These tickets have no external comments in the last 7 days:\n"
                 
-                # Get the stale tickets array
+                # Get Sateesh's stale tickets
                 TICKET_ARRAY=("${STALE_TICKETS_SATEESH[@]}")
                 
                 # List up to 5 stale tickets with direct links
@@ -476,26 +466,14 @@ jobs:
             SLACK_ID="${SLACK_IDS[$MEMBER]}"
           done
           
-          # Fix the age legend hyperlinks
-          TEAM_WEEK_JQL="assignee in (\"${MEMBERS[0]}\""
-          for ((i=1; i<${#MEMBERS[@]}; i++)); do
-            TEAM_WEEK_JQL="${TEAM_WEEK_JQL}, \"${MEMBERS[$i]}\""
-          done
-          TEAM_WEEK_JQL="${TEAM_WEEK_JQL}) AND status NOT IN (Closed, Resolved, Cancelled) AND created >= -7d"
+          # Simplified team queries for a single member
+          TEAM_WEEK_JQL="assignee = \"${MEMBERS[0]}\" AND status NOT IN (Closed, Resolved, Cancelled) AND created >= -7d"
           TEAM_WEEK_LINK="${JIRA_BROWSE_URL}$(urlencode "$TEAM_WEEK_JQL")"
           
-          TEAM_MONTH_JQL="assignee in (\"${MEMBERS[0]}\""
-          for ((i=1; i<${#MEMBERS[@]}; i++)); do
-            TEAM_MONTH_JQL="${TEAM_MONTH_JQL}, \"${MEMBERS[$i]}\""
-          done
-          TEAM_MONTH_JQL="${TEAM_MONTH_JQL}) AND status NOT IN (Closed, Resolved, Cancelled) AND created < -7d AND created >= -30d"
+          TEAM_MONTH_JQL="assignee = \"${MEMBERS[0]}\" AND status NOT IN (Closed, Resolved, Cancelled) AND created < -7d AND created >= -30d"
           TEAM_MONTH_LINK="${JIRA_BROWSE_URL}$(urlencode "$TEAM_MONTH_JQL")"
           
-          TEAM_OLDER_JQL="assignee in (\"${MEMBERS[0]}\""
-          for ((i=1; i<${#MEMBERS[@]}; i++)); do
-            TEAM_OLDER_JQL="${TEAM_OLDER_JQL}, \"${MEMBERS[$i]}\""
-          done
-          TEAM_OLDER_JQL="${TEAM_OLDER_JQL}) AND status NOT IN (Closed, Resolved, Cancelled) AND created < \"-30d\""
+          TEAM_OLDER_JQL="assignee = \"${MEMBERS[0]}\" AND status NOT IN (Closed, Resolved, Cancelled) AND created < \"-30d\""
           TEAM_OLDER_LINK="${JIRA_BROWSE_URL}$(urlencode "$TEAM_OLDER_JQL")"
           
           # Build the summary message
@@ -512,12 +490,8 @@ jobs:
               PRIORITY_SUMMARY="${PRIORITY_SUMMARY} | "
             fi
             
-            # Create priority-specific JQL across team members
-            PRIORITY_JQL="assignee in (\"${MEMBERS[0]}\""
-            for ((j=1; j<${#MEMBERS[@]}; j++)); do
-              PRIORITY_JQL="${PRIORITY_JQL}, \"${MEMBERS[$j]}\""
-            done
-            PRIORITY_JQL="${PRIORITY_JQL}) AND status NOT IN (Closed, Resolved, Cancelled) AND \"$PRIORITY_FIELD\".value = \"${PRIORITY_NAMES[$i]}\""
+            # Create priority-specific JQL for Sateesh only
+            PRIORITY_JQL="assignee = \"${MEMBERS[0]}\" AND status NOT IN (Closed, Resolved, Cancelled) AND \"$PRIORITY_FIELD\".value = \"${PRIORITY_NAMES[$i]}\""
             PRIORITY_JQL_ENCODED=$(urlencode "$PRIORITY_JQL")
             PRIORITY_LINK="${JIRA_BROWSE_URL}${PRIORITY_JQL_ENCODED}"
             
@@ -532,7 +506,7 @@ jobs:
           # Add age breakdown with hyperlinks
           AGE_SUMMARY="\n• *Tickets by Age:* "
           
-          # Query for team-wide age counts
+          # Query for team-wide age counts (single member)
           TEAM_WEEK_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "${JIRA_API_URL}?jql=$(urlencode "$TEAM_WEEK_JQL")&maxResults=0")
           TEAM_WEEK_COUNT=$(jq -r '.total' <<< "$TEAM_WEEK_RESPONSE")
           
@@ -588,19 +562,16 @@ jobs:
           echo "${SUMMARY_MESSAGE}" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
           
-          # Send individual DMs to team members
-          for i in "${!MEMBERS[@]}"; do
-            MEMBER="${MEMBERS[$i]}"
-            DM_MESSAGE="${MEMBER_MESSAGES_FOR_DM[$i]}"
-            SLACK_ID="${SLACK_IDS[$MEMBER]}"
-            
-            echo "SLACK_DM_${i}<<EOF" >> $GITHUB_OUTPUT
-            echo "${DM_MESSAGE}" >> $GITHUB_OUTPUT
-            echo "EOF" >> $GITHUB_OUTPUT
-            
-            echo "SLACK_ID_${i}=${SLACK_ID}" >> $GITHUB_OUTPUT
-          done
+          # Send individual DM to Sateesh
+          DM_MESSAGE="${MEMBER_MESSAGES_FOR_DM[0]}"
+          SLACK_ID="${SLACK_IDS["Sateesh Gulivindala"]}"
           
-          echo "MEMBER_COUNT=${#MEMBERS[@]}" >> $GITHUB_OUTPUT
+          echo "SLACK_DM_0<<EOF" >> $GITHUB_OUTPUT
+          echo "${DM_MESSAGE}" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+          echo "SLACK_ID_0=${SLACK_ID}" >> $GITHUB_OUTPUT
+          
+          echo "MEMBER_COUNT=1" >> $GITHUB_OUTPUT
           
           echo "===== JIRA MONITOR SCRIPT COMPLETED ====="
