@@ -64,8 +64,8 @@ jobs:
           
           # Define team members to monitor with full names and their Slack user IDs
           declare -A SLACK_IDS
-          SLACK_IDS["Sateesh Gulivindala"]="U017R3REG2D"
-          SLACK_IDS["Rambabu Yarramsetti"]="U017R3REG2D"
+          SLACK_IDS["Sateesh Gulivindala"]="U07Q1MMFM6Z"
+          SLACK_IDS["Rambabu Yarramsetti"]="U07Q1MMFM6Z"
           
           MEMBERS=("Sateesh Gulivindala" "Rambabu Yarramsetti")
           echo "Monitoring tickets for: ${MEMBERS[*]}"
@@ -552,3 +552,81 @@ jobs:
             else
               PRIORITY_SUMMARY="${PRIORITY_SUMMARY}${PRIORITY_SHORT[$i]}: ${PRIORITY_COUNTS[$i]}"
             fi
+          done
+          SUMMARY_MESSAGE="${SUMMARY_MESSAGE}${PRIORITY_SUMMARY}"
+          
+          # Add age breakdown with hyperlinks
+          AGE_SUMMARY="\n• *Tickets by Age:* "
+          
+          # Query for team-wide age counts
+          TEAM_WEEK_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "${JIRA_API_URL}?jql=$(urlencode "$TEAM_WEEK_JQL")&maxResults=0")
+          TEAM_WEEK_COUNT=$(jq -r '.total' <<< "$TEAM_WEEK_RESPONSE")
+          
+          TEAM_MONTH_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "${JIRA_API_URL}?jql=$(urlencode "$TEAM_MONTH_JQL")&maxResults=0")
+          TEAM_MONTH_COUNT=$(jq -r '.total' <<< "$TEAM_MONTH_RESPONSE")
+          
+          TEAM_OLDER_RESPONSE=$(curl -s -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" "${JIRA_API_URL}?jql=$(urlencode "$TEAM_OLDER_JQL")&maxResults=0")
+          TEAM_OLDER_COUNT=$(jq -r '.total' <<< "$TEAM_OLDER_RESPONSE")
+          
+          if [ "$TEAM_WEEK_COUNT" -gt 0 ]; then
+            AGE_SUMMARY="${AGE_SUMMARY}<${TEAM_WEEK_LINK}|${TEAM_WEEK_COUNT}> (≤7d)"
+          else
+            AGE_SUMMARY="${AGE_SUMMARY}${TEAM_WEEK_COUNT} (≤7d)"
+          fi
+          
+          AGE_SUMMARY="${AGE_SUMMARY} | "
+          
+          if [ "$TEAM_MONTH_COUNT" -gt 0 ]; then
+            AGE_SUMMARY="${AGE_SUMMARY}<${TEAM_MONTH_LINK}|${TEAM_MONTH_COUNT}> (8-30d)"
+          else
+            AGE_SUMMARY="${AGE_SUMMARY}${TEAM_MONTH_COUNT} (8-30d)"
+          fi
+          
+          AGE_SUMMARY="${AGE_SUMMARY} | "
+          
+          if [ "$TEAM_OLDER_COUNT" -gt 0 ]; then
+            AGE_SUMMARY="${AGE_SUMMARY}<${TEAM_OLDER_LINK}|${TEAM_OLDER_COUNT}> (>30d)"
+          else
+            AGE_SUMMARY="${AGE_SUMMARY}${TEAM_OLDER_COUNT} (>30d)"
+          fi
+          
+          SUMMARY_MESSAGE="${SUMMARY_MESSAGE}${AGE_SUMMARY}"
+          
+          # Add count of undefined priority tickets if any exist
+          if [ $UNDEFINED_PRIORITY_COUNT -gt 0 ]; then
+            SUMMARY_MESSAGE="${SUMMARY_MESSAGE}\n• *Note:* ${UNDEFINED_PRIORITY_COUNT} tickets have undefined priority (counted as P3)"
+          fi
+          
+          # Add members' details
+          SUMMARY_MESSAGE="${SUMMARY_MESSAGE}\n\n*Team Details:*"
+          for MEMBER_MESSAGE in "${MEMBER_MESSAGES[@]}"; do
+            SUMMARY_MESSAGE="${SUMMARY_MESSAGE}\n${MEMBER_MESSAGE}"
+          done
+          
+          # Add final footer with explanation of stale tickets
+          SUMMARY_MESSAGE="${SUMMARY_MESSAGE}\n\n*Note:* Stale tickets have no external comments within the last 7 days."
+          
+          # Print the summary message for debug
+          echo "Summary message created successfully"
+          
+          # Set outputs for GitHub Action
+          echo "SUMMARY_MESSAGE<<EOF" >> $GITHUB_OUTPUT
+          echo "${SUMMARY_MESSAGE}" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+          # Send individual DMs to team members
+          for i in "${!MEMBERS[@]}"; do
+            MEMBER="${MEMBERS[$i]}"
+            DM_MESSAGE="${MEMBER_MESSAGES_FOR_DM[$i]}"
+            SLACK_ID="${SLACK_IDS[$MEMBER]}"
+            
+            echo "SLACK_DM_${i}<<EOF" >> $GITHUB_OUTPUT
+            echo "${DM_MESSAGE}" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            
+            echo "SLACK_ID_${i}=${SLACK_ID}" >> $GITHUB_OUTPUT
+          done
+          
+          echo "MEMBER_COUNT=${#MEMBERS[@]}" >> $GITHUB_OUTPUT
+          
+          echo "===== JIRA MONITOR SCRIPT COMPLETED ====="
